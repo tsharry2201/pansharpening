@@ -7,6 +7,7 @@ import torch.distributed as dist
 from torch.nn.parallel.distributed import DistributedDataParallel as DDP
 from torch.optim import AdamW
 import datetime
+import wandb
 from utils import dist_util
 from improved_diffusion import logger
 from .fp16_util import (
@@ -142,10 +143,12 @@ class TrainLoop:
         self.model.convert_to_fp16()
 
     def run_loop(self):
+        epoch = 0
         while (
             not self.lr_anneal_steps
             or self.step + self.resume_step < self.lr_anneal_steps
         ):
+            self.model.set_epoch(epoch)
             cond = {}
             batch = next(iter(self.data), None)
             # print(batch['gt'].shape)
@@ -168,6 +171,8 @@ class TrainLoop:
                 if os.environ.get("DIFFUSION_TRAINING_TEST", "") and self.step > 0:
                     return
             self.step += 1
+            
+            spoch +=1
         # Save the last checkpoint if it wasn't already saved.
         if (self.step - 1) % self.save_interval != 0:
             self.save()
@@ -216,9 +221,19 @@ class TrainLoop:
                 )
 
             loss = (losses["loss"] * weights).mean()
+            weighted_losses = {k: v * weights for k, v in losses.items()}
             log_loss_dict(
-                self.diffusion, t, {k: v * weights for k, v in losses.items()}
+                self.diffusion, t, weighted_losses
             )
+            
+            # 记录loss到wandb
+            try:
+                wandb.log({
+                    "loss": weighted_losses["loss"].mean().item(),
+                    "timestep": t.mean().item() if hasattr(t, 'mean') else float(t[0])
+                })
+            except:
+                pass
             if self.use_fp16:
                 loss_scale = 2 ** self.lg_loss_scale
                 (loss * loss_scale).backward()
@@ -266,10 +281,21 @@ class TrainLoop:
             param_group["lr"] = lr
 
     def log_step(self):
-        logger.logkv("step", self.step + self.resume_step)
-        logger.logkv("samples", (self.step + self.resume_step + 1) * self.global_batch)
+        step = self.step + self.resume_step
+        logger.logkv("step", step)
+        logger.logkv("samples", (step + 1) * self.global_batch)
         if self.use_fp16:
             logger.logkv("lg_loss_scale", self.lg_loss_scale)
+            
+        # 记录到wandb
+        try:
+            wandb.log({
+                "step": step,
+                "samples": (step + 1) * self.global_batch,
+                "learning_rate": self.opt.param_groups[0]["lr"]
+            })
+        except:
+            pass  # 如果wandb未初始化则忽略
 
     def save(self):
         def save_checkpoint(rate, params):

@@ -11,6 +11,9 @@ import os
 import torch.cuda
 import torch as th
 import numpy as np
+import datetime
+import socket
+import wandb
 
 rootPath = os.path.abspath(os.path.dirname(__file__))
 
@@ -43,6 +46,23 @@ def main(
     if device is not None:
         args.device = device
     torch.cuda.set_device(args.device)
+    
+    # 初始化wandb
+    run_dir = os.path.join("runs", datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
+    os.makedirs(run_dir, exist_ok=True)
+    
+    wandb.init(
+        config=args,
+        project="ssdiff-pansharpening",
+        entity="zelilin",
+        notes=socket.gethostname(),
+        name="WV3-SSDiff_ARConv",
+        dir=run_dir,
+        job_type="training",
+        mode="offline",  # 可以改为"offline"如果不想上传到wandb
+        reinit=True
+    )
+    
     logger.configure(dir='/'.join([rootPath, 'logs/train_logs/']))
 
     logger.log("creating model and diffusion...")
@@ -85,6 +105,9 @@ def main(
         lr_anneal_steps=args.lr_anneal_steps,
         rootPath=rootPath,
     ).run_loop()
+    
+    # 完成wandb记录
+    wandb.finish()
 
 
 if __name__ == "__main__":

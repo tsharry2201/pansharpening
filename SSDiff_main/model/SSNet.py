@@ -11,7 +11,7 @@ from model.nn import (
     normalization,
     timestep_embedding,
 )
-
+from model.ARConv import ARConv
 def init_weights(*modules):
     for module in modules:
         for m in module.modules():
@@ -65,11 +65,20 @@ class ResBlock(nn.Module):
         norm_type="gn",
         dropout=0.0,
         dims=2,
-        use_scale_shift_norm=False
+        use_scale_shift_norm=False,
+        use_arconv=False,
+        arconv_hw_range=[1,9]
+        
     ):
         super().__init__()
-        self.conv0 = nn.Conv2d(in_channels, hidden_channels, 3, 1, 1)
-        self.conv1 = nn.Conv2d(hidden_channels, out_channels, 3, 1, 1)
+        self.use_arconv = use_arconv
+        self.arconv_hw_range = arconv_hw_range
+        if use_arconv:
+            self.conv0 = ARConv(in_channels, hidden_channels, 3, 1, 1)
+            self.conv1 = ARConv(hidden_channels, out_channels, 3, 1, 1)
+        else:
+            self.conv0 = nn.Conv2d(in_channels, hidden_channels, 3, 1, 1)
+            self.conv1 = nn.Conv2d(hidden_channels, out_channels, 3, 1, 1)
         self.relu = nn.LeakyReLU()
         emb_channels = model_channels * 4     # model_channel * 4
         self.use_scale_shift_norm = use_scale_shift_norm
@@ -108,9 +117,14 @@ class ResBlock(nn.Module):
         return h
     
     
-    def forward(self, x, emb):         # 32 64 64
-        rs1 = self.relu(self.conv0(x))
-        rs1 = self.conv1(rs1)   # 32 64 64
+    def forward(self, x, emb,epoch=0):         # 32 64 64
+        if self.use_arconv:
+            rs1 = self.relu(self.conv0(x, epoch, self.arconv_hw_range))
+            rs1 = self.conv1(rs1, epoch, self.arconv_hw_range)
+        else:
+            rs1 = self.relu(self.conv0(x))
+            rs1 = self.conv1(rs1)
+            
         rs1 = self.time_emb(rs1, emb)
         rs = torch.add(x, rs1)
         return rs
@@ -195,7 +209,7 @@ class SSNet(PatchMergeModule):
         device='cpu',
         norm_type="bn",
         crop_batch_size=1,
-        use_scale_shift_norm=False,
+        use_scale_shift_norm=False
     ):
         super().__init__(True, crop_batch_size, [64, 64, 16], device=device)
         ms_dim = ms_dim  # qb:4, gf2,  wv3:8
@@ -204,7 +218,7 @@ class SSNet(PatchMergeModule):
         self.model_channels = model_channels
         self.use_scale_shift_norm = use_scale_shift_norm
         self.device = device
-        
+        self.current_epoch = 0
         self.relu = nn.LeakyReLU()
         self.upsample = Upsample(ms_dim)
         self.raise_ms_dim = nn.Sequential(
@@ -241,22 +255,22 @@ class SSNet(PatchMergeModule):
         self.fusformer0 = Fusformer(dim0, dim0//dim_head, dim_head, int(dim0*se_ratio_mlp))
         self.down0 = Down(dim0, dim1)
         self.resblock0 = ResBlock(dim0, int(se_ratio_rb*dim0), dim0,
-                                  model_channels=self.model_channels, use_scale_shift_norm=use_scale_shift_norm) # 32 16 32 128
+                                  model_channels=self.model_channels, use_scale_shift_norm=use_scale_shift_norm,use_arconv=True,arconv_hw_range=[1,9]) # 32 16 32 128
  
         # layer 1
         self.fusformer1 = Fusformer(dim1, dim1//dim_head, dim_head, int(dim1*se_ratio_mlp))
         self.down1 = Down(dim1, dim2)
-        self.resblock1 = ResBlock(dim1, int(se_ratio_rb*dim1), dim1, use_scale_shift_norm=use_scale_shift_norm)
+        self.resblock1 = ResBlock(dim1, int(se_ratio_rb*dim1), dim1, use_scale_shift_norm=use_scale_shift_norm,use_arconv=True,arconv_hw_range=[1,9])
 
         # layer 2
         self.fusformer2 = Fusformer(dim2, dim2//dim_head, dim_head, int(dim2*se_ratio_mlp))
         self.up0 = Up(dim2, dim3)
-        self.resblock2 = ResBlock(dim2, int(se_ratio_rb*dim2), dim2, use_scale_shift_norm=use_scale_shift_norm)
+        self.resblock2 = ResBlock(dim2, int(se_ratio_rb*dim2), dim2, use_scale_shift_norm=use_scale_shift_norm,use_arconv=True,arconv_hw_range=[1,9])
 
         # layer 3
         self.fusformer3 = Fusformer(dim3, dim3//dim_head, dim_head, int(dim3*se_ratio_mlp))
         self.up1 = Up(dim3, dim4)
-        self.resblock3 = ResBlock(dim3, int(se_ratio_rb*dim3), dim3, use_scale_shift_norm=use_scale_shift_norm)
+        self.resblock3 = ResBlock(dim3, int(se_ratio_rb*dim3), dim3, use_scale_shift_norm=use_scale_shift_norm,use_arconv=True,arconv_hw_range=[1,9])
 
         # layer 4
         self.fusformer4 = Fusformer(dim4, dim4//dim_head, dim_head, int(dim4*se_ratio_mlp))
@@ -383,7 +397,7 @@ class SSNet(PatchMergeModule):
         skip_c10 = x  # 32 64 64
         x = self.down0(x)  # 64 32 32
         
-        y = self.resblock0(y, emb)  # 32 64 64
+        y = self.resblock0(y, emb, epoch=self.current_epoch)  # 32 64 64
         skip_c11 = y  # 32 64 64
         y = self.down0(y)  # 64 32 32
 
@@ -396,7 +410,7 @@ class SSNet(PatchMergeModule):
         x = self.down1(x)  # 128 16 16
         
         
-        y = self.resblock1(y, emb)  # 64 32 32
+        y = self.resblock1(y, emb,epoch=self.current_epoch)  # 64 32 32
         skip_c21 = y  # 64 32 32
         y = self.down1(y)  # 128 16 16
 
@@ -406,7 +420,7 @@ class SSNet(PatchMergeModule):
         x = self.fusformer2(x, y2)  # 128 16 16
         x = self.up0(x, skip_c20)  # 64 32 32
         
-        y = self.resblock2(y, emb)  # 128 16 16
+        y = self.resblock2(y, emb,epoch=self.current_epoch)  # 128 16 16
         y = self.up0(y, skip_c21)  # 64 32 32
 
         # layer 3
@@ -415,7 +429,7 @@ class SSNet(PatchMergeModule):
         x = self.fusformer3(x, y3)  # 64 32 32
         x = self.up1(x, skip_c10)  # 32 64 64
         
-        y = self.resblock3(y, emb)  # 64 32 32
+        y = self.resblock3(y, emb,epoch=self.current_epoch)  # 64 32 32
         y = self.up1(y, skip_c11)  # 32 64 64
 
         # layer 4
@@ -428,7 +442,9 @@ class SSNet(PatchMergeModule):
 
         
         return output
-
+    def set_epoch(self, epoch):
+        """供训练循环调用来更新当前epoch"""
+        self.current_epoch = epoch
     def sample(self, 
                *args,
                **kwargs

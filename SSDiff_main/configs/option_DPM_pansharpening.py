@@ -21,6 +21,9 @@ class parser_args(TaskDispatcher, name='DPM_ps'):
 
         script_path = os.path.dirname(os.path.dirname(__file__))
         root_dir = script_path.split(cfg.task)[0].replace('\\', '/')
+        
+        # 硬编码数据集路径
+        data_dir = '/data2/user/zelilin/ARConv_SSDiff/SSDiff_main/dataset'
 
         ckpt_model_path = ""
         
@@ -31,6 +34,8 @@ class parser_args(TaskDispatcher, name='DPM_ps'):
         # * Logger
         parser.add_argument('--out_dir', metavar='DIR', default=f'{root_dir}/results/{cfg.task}',
                             help='path to save model')
+        parser.add_argument('--data_dir', metavar='DIR', default=data_dir,
+                            help='path to dataset')
         # * Training
         parser.add_argument('--lr', default=1e-3, type=float)  # 1e-4 2e-4
         parser.add_argument('--lr_scheduler', default=True, type=bool)
