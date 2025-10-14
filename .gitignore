@@ -1,0 +1,12 @@
+# Ignore datasets
+dataset/
+data/
+*.tif
+*.mat
+*.h5
+*.zip
+*.tar
+*.tar.gz
+*.npy
+*.pth
+*.pkl
