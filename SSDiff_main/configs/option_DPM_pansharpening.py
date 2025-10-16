@@ -27,9 +27,12 @@ class parser_args(TaskDispatcher, name='DPM_ps'):
 
         ckpt_model_path = ""
         
-        test_model_path = ""
+        # 修改为您的模型路径
+        # EMA模型（推荐）：results/MM-DD-HH-MM/ema_0.9999_XXXXXX.pt
+        # 或主模型：results/MM-DD-HH-MM/modelXXXXXX.pt
+        test_model_path = "/data2/user/zelilin/ARConv_SSDiff/SSDiff_main/results/10-14-22-28/model060000.pt"
 
-
+        #10-14-22-28代表是+ARConv的    10-15-17-45是没有ARConv的
         parser = argparse.ArgumentParser(description='PyTorch Training')
         # * Logger
         parser.add_argument('--out_dir', metavar='DIR', default=f'{root_dir}/results/{cfg.task}',

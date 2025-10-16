@@ -37,7 +37,7 @@ def set_seed(seed):
     
 
 def main(
-    device='cuda:1',
+    device='cuda:6',
     Resume = False
     ):
     
@@ -47,6 +47,9 @@ def main(
         args.device = device
     torch.cuda.set_device(args.device)
     
+    # 设置最大训练步数为12万
+    args.lr_anneal_steps = 120000
+    
     # 初始化wandb
     run_dir = os.path.join("runs", datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
     os.makedirs(run_dir, exist_ok=True)
@@ -54,7 +57,7 @@ def main(
     wandb.init(
         config=args,
         project="ssdiff-pansharpening",
-        entity="zelilin",
+        entity="tszharry-xi-an-jiaotong-university-",
         notes=socket.gethostname(),
         name="WV3-SSDiff_ARConv",
         dir=run_dir,
@@ -111,5 +114,4 @@ def main(
 
 
 if __name__ == "__main__":
-
     main()

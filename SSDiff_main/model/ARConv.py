@@ -104,7 +104,9 @@ class ARConv(nn.Module):
         offset = self.p_conv(x * 100)
         l = self.l_conv(offset) * (hw_range[1] - 1) + 1  # b, 1, h, w
         w = self.w_conv(offset) * (hw_range[1] - 1) + 1  # b, 1, h, w
-        if epoch <= 100:
+        # 对于SSDiff，使用自适应的固定epoch值（从__init__计算得到）
+        fix_epoch = 10000
+        if epoch <= fix_epoch:
             mean_l = l.mean(dim=0).mean(dim=1).mean(dim=1)
             mean_w = w.mean(dim=0).mean(dim=1).mean(dim=1)
             N_X = int(mean_l // scale)
@@ -116,7 +118,7 @@ class ARConv(nn.Module):
             N_X, N_Y = phi(N_X), phi(N_Y)
             N_X, N_Y = max(N_X, 3), max(N_Y, 3)
             N_X, N_Y = min(N_X, 7), min(N_Y, 7)
-            if epoch == 100:
+            if epoch == fix_epoch:
                 self.reserved_NXY = self.reserved_NXY = nn.Parameter(
                     torch.tensor([N_X, N_Y], dtype=torch.int32, device=x.device),
                     requires_grad=False

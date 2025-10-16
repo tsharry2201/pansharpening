@@ -10,3 +10,18 @@ data/
 *.npy
 *.pth
 *.pkl
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.so
+
+# 训练输出
+logs/
+runs/
+train_logs/
+checkpoints/
+results/
+outputs/
+wandb/
+tensorboard/
+*.log

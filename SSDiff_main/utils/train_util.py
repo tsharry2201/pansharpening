@@ -71,6 +71,7 @@ class TrainLoop:
         self.resume_step = 0
         self.global_batch = self.batch_size
         self.loca=datetime.datetime.now().strftime('%m-%d-%H-%M')
+        self.current_loss = 0.0  # 用于记录当前loss到wandb
         
         self.model_params = list(self.model.parameters())
         self.master_params = self.model_params
@@ -102,12 +103,12 @@ class TrainLoop:
 
         if resume_checkpoint:
             self.resume_step = parse_resume_step_from_filename(resume_checkpoint)
-            if dist.get_rank() == 0:
+            # 检查是否在分布式训练模式下
+            if not dist.is_initialized() or dist.get_rank() == 0:
                 logger.log(f"loading model from checkpoint: {resume_checkpoint}...")
+                # 单GPU训练直接使用torch.load
                 self.model.load_state_dict(
-                    dist_util.load_state_dict(
-                        resume_checkpoint, map_location=dist_util.dev()
-                    )
+                    th.load(resume_checkpoint, map_location=self.device)
                 )
 
     def _load_ema_parameters(self, rate):
@@ -116,26 +117,28 @@ class TrainLoop:
         main_checkpoint = find_resume_checkpoint() or self.resume_checkpoint
         ema_checkpoint = find_ema_checkpoint(main_checkpoint, self.resume_step, rate)
         if ema_checkpoint:
-            if dist.get_rank() == 0:
+            # 检查是否在分布式训练模式下
+            if not dist.is_initialized() or dist.get_rank() == 0:
                 logger.log(f"loading EMA from checkpoint: {ema_checkpoint}...")
-                state_dict = dist_util.load_state_dict(
-                    ema_checkpoint, map_location=dist_util.dev()
-                )
+                # 单GPU训练直接使用torch.load
+                state_dict = th.load(ema_checkpoint, map_location=self.device)
                 ema_params = self._state_dict_to_master_params(state_dict)
 
-        dist_util.sync_params(ema_params)
+        # 只在分布式模式下同步参数
+        if dist.is_initialized():
+            dist_util.sync_params(ema_params)
         return ema_params
 
     def _load_optimizer_state(self):
         main_checkpoint = find_resume_checkpoint() or self.resume_checkpoint
-        opt_checkpoint = bf.join(
-            bf.dirname(main_checkpoint), f"opt{self.resume_step:06}.pt"
+        # 使用os.path代替bf
+        opt_checkpoint = os.path.join(
+            os.path.dirname(main_checkpoint), f"opt{self.resume_step:06}.pt"
         )
-        if bf.exists(opt_checkpoint):
+        if os.path.exists(opt_checkpoint):
             logger.log(f"loading optimizer state from checkpoint: {opt_checkpoint}")
-            state_dict = dist_util.load_state_dict(
-                opt_checkpoint, map_location=dist_util.dev()
-            )
+            # 单GPU训练直接使用torch.load
+            state_dict = th.load(opt_checkpoint, map_location=self.device)
             self.opt.load_state_dict(state_dict)
 
     def _setup_fp16(self):
@@ -172,7 +175,7 @@ class TrainLoop:
                     return
             self.step += 1
             
-            spoch +=1
+            epoch +=1
         # Save the last checkpoint if it wasn't already saved.
         if (self.step - 1) % self.save_interval != 0:
             self.save()
@@ -226,14 +229,8 @@ class TrainLoop:
                 self.diffusion, t, weighted_losses
             )
             
-            # 记录loss到wandb
-            try:
-                wandb.log({
-                    "loss": weighted_losses["loss"].mean().item(),
-                    "timestep": t.mean().item() if hasattr(t, 'mean') else float(t[0])
-                })
-            except:
-                pass
+            # 保存当前loss用于后续记录
+            self.current_loss = weighted_losses["loss"].mean().item()
             if self.use_fp16:
                 loss_scale = 2 ** self.lg_loss_scale
                 (loss * loss_scale).backward()
@@ -289,11 +286,16 @@ class TrainLoop:
             
         # 记录到wandb
         try:
-            wandb.log({
+            log_dict = {
                 "step": step,
                 "samples": (step + 1) * self.global_batch,
                 "learning_rate": self.opt.param_groups[0]["lr"]
-            })
+            }
+            # 添加loss记录
+            if hasattr(self, 'current_loss'):
+                log_dict["loss"] = self.current_loss
+            
+            wandb.log(log_dict)
         except:
             pass  # 如果wandb未初始化则忽略
 
@@ -327,7 +329,7 @@ class TrainLoop:
         return state_dict
 
     def _state_dict_to_master_params(self, state_dict):
-        params = [state_dict[name] for name, _ in self.model.named_parameters()]
+        params = [state_dict[name].to(self.device) for name, _ in self.model.named_parameters()]
         if self.use_fp16:
             return make_master_params(params)
         else:
@@ -363,8 +365,9 @@ def find_ema_checkpoint(main_checkpoint, step, rate):
     if main_checkpoint is None:
         return None
     filename = f"ema_{rate}_{(step):06d}.pt"
-    path = bf.join(bf.dirname(main_checkpoint), filename)
-    if bf.exists(path):
+    # 使用os.path代替bf
+    path = os.path.join(os.path.dirname(main_checkpoint), filename)
+    if os.path.exists(path):
         return path
     return None
 

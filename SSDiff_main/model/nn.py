@@ -65,7 +65,12 @@ def update_ema(target_params, source_params, rate=0.99):
     :param rate: the EMA rate (closer to 1 means slower).
     """
     for targ, src in zip(target_params, source_params):
-        targ.detach().mul_(rate).add_(src.to('cpu'), alpha=1 - rate)
+        # 跳过非浮点类型参数（如整型buffer）
+        if not targ.dtype.is_floating_point:
+            targ.copy_(src.to(targ.device))
+        else:
+            # 确保source和target在同一设备上
+            targ.detach().mul_(rate).add_(src.to(targ.device).to(targ.dtype), alpha=1 - rate)
 
 
 def zero_module(module):
