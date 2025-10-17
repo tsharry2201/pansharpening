@@ -29,7 +29,7 @@ rootPath = os.path.abspath(os.path.dirname(__file__))
 
 
 def main(
-    device='cuda:7',
+    device='cuda:5',
     crop_batch_size=8,
     timestep_respacing="ddim10",
     test_dataset=None  # 新增：指定测试数据集
@@ -59,6 +59,12 @@ def main(
 
     model.load_state_dict(th.load(args.model_path, map_location=lambda storage, loc: storage.cuda()))
     model.cuda()
+    
+    # 设置 epoch > 1000，确保 ARConv 使用训练好的固定卷积核（reserved_NXY）
+    # 而不是动态计算卷积核大小
+    model.set_epoch(10001)
+    logger.log("Set epoch to 10001 for using fixed ARConv kernel size")
+    
     model.eval()
 
     logger.log("sampling...")
@@ -71,6 +77,9 @@ def main(
 
 
     data4gt = []
+    data4lms = []
+    data4ms = []
+    data4pan = []
     # image_num = len(data)
     image_num = 20
     print("image_num:", image_num)
@@ -83,6 +92,9 @@ def main(
         gt =  einops.rearrange(gt, 'b k1 k2 c -> b c k1 k2')
 
         data4gt.append(gt[0])
+        data4lms.append(lms_ori[0])
+        data4ms.append(ms_ori[0])
+        data4pan.append(pan_ori[0])
 
         pan, lms, ms = map(lambda x: x.cuda(), (pan_ori, lms_ori, ms_ori))
         logger.log(f"test [{i}]/[{image_num}],  {args.timestep_respacing}", pan.shape, lms.shape, ms.shape)
@@ -137,6 +149,9 @@ def main(
     d = dict(  # [b, h, w, c], wv3 [0, 2047]
             gt=[sample.cpu().numpy()*2047 for sample in data4gt],
             sr=[sample for sample in arr],
+            lms=[sample.cpu().numpy() for sample in data4lms],
+            ms=[sample.cpu().numpy() for sample in data4ms],
+            pan=[sample.cpu().numpy() for sample in data4pan],
             model_name=model_name,
             model_dir=model_dir,
             model_path=model_path,
@@ -161,8 +176,8 @@ if __name__ == "__main__":
     # Full-Resolution: 'test_wv3_OrigScale_multiExm1.h5'
     
     # Reduced-Resolution 评估
-    #out_path = main()
+    out_path = main()
     
     # Full-Resolution 评估（取消注释以使用）
-    out_path = main(test_dataset='test_wv3_OrigScale_multiExm1.h5')
+    #out_path = main(test_dataset='test_wv3_OrigScale_multiExm1.h5')
 

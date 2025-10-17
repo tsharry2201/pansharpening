@@ -101,16 +101,28 @@ class ARConv(nn.Module):
             scale = 1
         m = self.m_conv(x)
         bias = self.b_conv(x)
+        # 检查输入是否有 NaN 或 Inf
+        if torch.isnan(x).any() or torch.isinf(x).any():
+            print(f"[ARConv] Warning: Input contains NaN or Inf! x range: [{x.min():.4f}, {x.max():.4f}]")
+            # 将 NaN 和 Inf 替换为 0
+            x = torch.nan_to_num(x, nan=0.0, posinf=1.0, neginf=0.0)
+        
         offset = self.p_conv(x * 100)
         l = self.l_conv(offset) * (hw_range[1] - 1) + 1  # b, 1, h, w
         w = self.w_conv(offset) * (hw_range[1] - 1) + 1  # b, 1, h, w
         # 对于SSDiff，使用自适应的固定epoch值（从__init__计算得到）
-        fix_epoch = 10000
+        fix_epoch = 1000  ## 原来是10000 后改为1000
         if epoch <= fix_epoch:
             mean_l = l.mean(dim=0).mean(dim=1).mean(dim=1)
             mean_w = w.mean(dim=0).mean(dim=1).mean(dim=1)
-            N_X = int(mean_l // scale)
-            N_Y = int(mean_w // scale)
+            
+            # 处理 NaN 值：如果出现 NaN，使用默认值
+            if torch.isnan(mean_l).any() or torch.isnan(mean_w).any():
+                N_X = 3
+                N_Y = 3
+            else:
+                N_X = int(mean_l // scale)
+                N_Y = int(mean_w // scale)
             def phi(x):
                 if x % 2 == 0:
                     x -= 1

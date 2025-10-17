@@ -30,9 +30,9 @@ class parser_args(TaskDispatcher, name='DPM_ps'):
         # 修改为您的模型路径
         # EMA模型（推荐）：results/MM-DD-HH-MM/ema_0.9999_XXXXXX.pt
         # 或主模型：results/MM-DD-HH-MM/modelXXXXXX.pt
-        test_model_path = "/data2/user/zelilin/ARConv_SSDiff/SSDiff_main/results/10-14-22-28/model060000.pt"
+        test_model_path = "/data2/user/zelilin/ARConv_SSDiff/SSDiff_main/results/10-15-22-29/model020000.pt"
 
-        #10-14-22-28代表是+ARConv的    10-15-17-45是没有ARConv的
+        #10-14-22-28代表是+ARConv的    10-15-17-45是没有ARConv的  10-15-22-29是调整ARConv中限制多少epoch后即固定卷积核的 
         parser = argparse.ArgumentParser(description='PyTorch Training')
         # * Logger
         parser.add_argument('--out_dir', metavar='DIR', default=f'{root_dir}/results/{cfg.task}',
@@ -117,7 +117,9 @@ class parser_args(TaskDispatcher, name='DPM_ps'):
         parser.add_argument('--use_ddim', default=True)
         parser.add_argument('--model_path', default=test_model_path) # model_path
 
-        args = parser.parse_args()
+        # 修改：使用空参数列表避免与train_ssdiff_distill.py的参数解析冲突
+        # 仅使用默认值，不从命令行读取
+        args = parser.parse_args(args=[])
         args.start_epoch = args.best_epoch = 1
         args.experimental_desc = 'Test'
         cfg.merge_args2cfg(args)

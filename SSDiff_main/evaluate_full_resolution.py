@@ -353,15 +353,46 @@ def evaluate_mat_file(mat_path, sensor='WV3', ratio=4, block_size=32):
     data = sio.loadmat(mat_path)
     
     # 检查必需的字段
-    required_fields = ['sr', 'lms', 'ms', 'pan']
+    required_fields = ['sr', 'ms', 'pan']
     for field in required_fields:
         if field not in data:
             raise ValueError(f"Mat 文件必须包含 '{field}' 字段")
     
     sr_images = data['sr']
-    lms_images = data['lms']  # 上采样的 MS
     ms_lr_images = data['ms']  # 低分辨率 MS
     pan_images = data['pan']
+    
+    # 如果有 lms 字段就使用，否则从 ms 上采样
+    if 'lms' in data:
+        lms_images = data['lms']  # 上采样的 MS
+        print("使用提供的 lms 字段")
+    else:
+        print("lms 字段不存在，将从 ms 上采样生成")
+        # 从 ms 上采样到与 sr 相同的分辨率
+        if isinstance(ms_lr_images, list):
+            lms_images = []
+            for ms_lr in ms_lr_images:
+                ms_lr_arr = np.array(ms_lr) if not isinstance(ms_lr, np.ndarray) else ms_lr
+                # 上采样
+                if ms_lr_arr.ndim == 3 and ms_lr_arr.shape[0] < ms_lr_arr.shape[2]:
+                    ms_lr_arr = np.transpose(ms_lr_arr, (1, 2, 0))  # (C, H, W) -> (H, W, C)
+                lms = interp23tap(ms_lr_arr, ratio)
+                lms_images.append(lms)
+        else:
+            ms_lr_arr = np.array(ms_lr_images)
+            if ms_lr_arr.ndim == 4:  # (N, C, H, W)
+                lms_images = []
+                for idx in range(ms_lr_arr.shape[0]):
+                    ms_lr_single = ms_lr_arr[idx]
+                    if ms_lr_single.shape[0] < ms_lr_single.shape[2]:
+                        ms_lr_single = np.transpose(ms_lr_single, (1, 2, 0))
+                    lms = interp23tap(ms_lr_single, ratio)
+                    lms_images.append(lms)
+                lms_images = np.array(lms_images)
+            else:
+                if ms_lr_arr.shape[0] < ms_lr_arr.shape[2]:
+                    ms_lr_arr = np.transpose(ms_lr_arr, (1, 2, 0))
+                lms_images = interp23tap(ms_lr_arr, ratio)
     
     print(f"SR shape: {sr_images.shape}")
     print(f"LMS shape: {lms_images.shape}")
