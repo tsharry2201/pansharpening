@@ -314,29 +314,42 @@ def main(args):
                     print(f"Model output - output_pred: {output_pred.shape}, residual_pred: {residual_pred.shape}")
                     print(f"Before residual calc - gt: {gt.shape}, lms: {lms.shape}")
                 
-                # 计算真实残差
+                # 🔥 OSEDiff风格修改：组合损失
+                # 1. L1重建损失（像素级监督）
                 gt_residual = gt - lms
-                
-                # 计算残差重建损失（使用L1，与原始SSDiff一致）
                 loss_l2 = F.l1_loss(
                     residual_pred.float(), 
                     gt_residual.float(), 
                     reduction="mean"
                 ) * args.lambda_l2
                 
-                loss = loss_l2
-                
-                # 计算分布匹配损失（使用最终输出output_pred）
+                # 2. VSD分布匹配损失（Teacher指导，新增）
+                # 处理DDP包装的情况
                 if torch.cuda.device_count() > 1:
-                    loss_vsd = model_reg.module.distribution_matching_loss(
+                    loss_vsd_teacher = model_gen.module.distribution_matching_loss(lms, pan, ms, gt) * args.lambda_vsd
+                else:
+                    loss_vsd_teacher = model_gen.distribution_matching_loss(lms, pan, ms, gt) * args.lambda_vsd
+                
+                # 3. 原有的分布匹配损失（使用model_reg）
+                if torch.cuda.device_count() > 1:
+                    loss_vsd_reg = model_reg.module.distribution_matching_loss(
                         lms, pan, ms, output_pred
                     ) * args.lambda_vsd
                 else:
-                    loss_vsd = model_reg.distribution_matching_loss(
+                    loss_vsd_reg = model_reg.distribution_matching_loss(
                         lms, pan, ms, output_pred
                     ) * args.lambda_vsd
                 
-                loss = loss + loss_vsd
+                # 4. 总损失
+                loss = loss_l2 + loss_vsd_teacher + loss_vsd_reg
+                
+                # 打印损失（每100步）
+                if global_step % 100 == 0:
+                    print(f"\n📊 Losses at step {global_step}:")
+                    print(f"   L1 Loss: {loss_l2.item():.6f}")
+                    print(f"   VSD Teacher Loss: {loss_vsd_teacher.item():.6f}")
+                    print(f"   VSD Reg Loss: {loss_vsd_reg.item():.6f}")
+                    print(f"   Total Loss: {loss.item():.6f}")
                 
                 # 反向传播
                 accelerator.backward(loss)
@@ -376,17 +389,25 @@ def main(args):
                 global_step += 1
                 
                 if accelerator.is_main_process:
-                    # 记录日志
-                    logs = {
+                    # 记录日志 - 只显示最重要的指标在进度条上
+                    progress_logs = {
+                        "loss_total": loss.detach().item(),
+                        "vsd_teacher": loss_vsd_teacher.detach().item(),
                         "loss_l2": loss_l2.detach().item(),
-                        "loss_vsd": loss_vsd.detach().item(),
+                    }
+                    progress_bar.set_postfix(**progress_logs)
+                    
+                    # 完整日志用于accelerator
+                    full_logs = {
+                        "loss_l2": loss_l2.detach().item(),
+                        "loss_vsd_teacher": loss_vsd_teacher.detach().item(),
+                        "loss_vsd_reg": loss_vsd_reg.detach().item(),
                         "loss_diff": loss_diff.detach().item(),
                         "loss_total": loss.detach().item(),
                     }
-                    progress_bar.set_postfix(**logs)
                     
                     # 保存checkpoint
-                    if global_step % args.checkpointing_steps == 1:
+                    if global_step % args.checkpointing_steps == 0:
                         outf = os.path.join(
                             args.output_dir, 
                             "checkpoints", 
@@ -397,18 +418,27 @@ def main(args):
                     
                     # 记录到wandb/tensorboard
                     if global_step % 10 == 0:
+                        # 获取当前实际学习率
+                        current_lr = optimizer.param_groups[0]['lr']
+                        current_lr_reg = optimizer_reg.param_groups[0]['lr']
+                        
                         wandb_logs = {
                             "train/loss_total": loss.item(),
                             "train/loss_l2": loss_l2.item(),
-                            "train/loss_vsd": loss_vsd.item(),
+                            "train/loss_vsd_teacher": loss_vsd_teacher.item(),
+                            "train/loss_vsd_reg": loss_vsd_reg.item(),
                             "train/loss_diff": loss_diff.item(),
                             "train/step": global_step,
-                            "train/learning_rate": args.learning_rate,
+                            "train/learning_rate": current_lr,
+                            "train/learning_rate_reg": current_lr_reg,
                             "train/epoch": epoch,
+                            "train/lambda_l2": args.lambda_l2,
+                            "train/lambda_vsd": args.lambda_vsd,
+                            "train/lambda_vsd_lora": args.lambda_vsd_lora,
                         }
-                        wandb.log(wandb_logs)
+                        wandb.log(wandb_logs, step=global_step)
                     
-                    accelerator.log(logs, step=global_step)
+                    accelerator.log(full_logs, step=global_step)
                 
                 # 早停
                 if global_step >= args.max_train_steps:

@@ -136,24 +136,48 @@ class SSDiff_gen(nn.Module):
         super().__init__()
         self.args = args
         
-        # 创建UNet和diffusion
+        # 🔥 OSEDiff风格修改：添加Teacher模型（冻结）
+        # Teacher：原始预训练的SSDiff（不添加LoRA）
+        print("📚 Loading Teacher model (frozen)...")
+        # 使用create_model_and_diffusion创建teacher（与student一致的结构）
+        self.unet_teacher, _ = create_model_and_diffusion(
+            **args_to_dict(args, model_and_diffusion_defaults().keys())
+        )
+        # 加载teacher权重
+        teacher_state = torch.load(args.pretrained_ssdiff_path, map_location='cpu')
+        self.unet_teacher.load_state_dict(teacher_state, strict=True)
+        # 冻结teacher
+        self.unet_teacher.eval()
+        for p in self.unet_teacher.parameters():
+            p.requires_grad = False
+        print("✅ Teacher model loaded and frozen")
+        
+        # Student：添加LoRA的可训练模型
+        print("🎓 Loading Student model (with LoRA)...")
         self.unet, self.lora_target_modules = initialize_ssdiff_unet_with_lora(
             args, 
             pretrained_path=args.pretrained_ssdiff_path
         )
+        print("✅ Student model loaded with LoRA")
         
         # 创建diffusion（用于单步去噪，使用顶部已导入的函数）
         _, self.diffusion = create_model_and_diffusion(
             **args_to_dict(args, model_and_diffusion_defaults().keys())
         )
         
-        # 固定在最后一个时间步（单步去噪）
-        self.timesteps = torch.tensor([999], dtype=torch.long)
+        # 打印predict_xstart设置（训练时）
+        print(f"🔍 [SSDiff_gen 训练] predict_xstart = {args.predict_xstart}")
+        
+        # 🔥 OSEDiff风格修改：不再固定timestep，训练时动态生成
+        # 推理时使用t=999，训练时使用随机timestep [100, 999)
+        self.inference_timestep = 999
         
         self.lora_rank = args.lora_rank
+        self.training = True  # 添加training标志
     
     def set_train(self):
         """设置训练模式，只有LoRA层可训练"""
+        self.training = True  # 设置训练标志
         self.unet.train()
         for n, p in self.unet.named_parameters():
             # 只有lora_down和lora_up参数可训练，base_layer参数冻结
@@ -164,7 +188,7 @@ class SSDiff_gen(nn.Module):
     
     def forward(self, lms, pan, ms, gt=None):
         """
-        前向传播（残差学习版本）
+        前向传播（残差学习版本，与原SSDiff对齐）
         
         Args:
             lms: 低分辨率多光谱图像 [B, 8, H, W]
@@ -177,25 +201,33 @@ class SSDiff_gen(nn.Module):
             residual_pred: UNet预测的残差
         """
         device = lms.device
-        self.timesteps = self.timesteps.to(device)
+        batch_size = lms.shape[0]
         
-        # 残差学习方案：与原始SSDiff保持一致
-        # 输入: 上采样的 LMS (作为基础)
-        # 输出: 残差 (GT - upsampled_LMS)  
-        # 最终: GT = upsampled_LMS + 残差
-        #
-        # 数据说明：
-        # - lms: 上采样后的低分辨率MS (64x64)
-        # - ms: 原始低分辨率MS (16x16)，会在forward_impl内部被upsample
-        # - x_t: 高分辨率的噪声/初始图像 (64x64)
+        # 🔥 训练时使用随机timestep
+        if self.training:
+            # 训练：随机timestep [100, 999)，覆盖多种噪声水平
+            timesteps = torch.randint(100, 999, (batch_size,), device=device, dtype=torch.long)
+        else:
+            # 推理：固定t=999单步
+            timesteps = torch.full((batch_size,), self.inference_timestep, device=device, dtype=torch.long)
         
-        # x_t从上采样的lms开始（64x64）
-        x_t = lms.clone()
+        # 🔥 核心修改：与原SSDiff完全一致，使用q_sample_xt
+        if self.training and gt is not None:
+            # 训练时：计算真残差，使用原SSDiff的扩散过程
+            gt_residual = gt - lms  # 真残差
+            
+            # 使用原SSDiff的q_sample_xt进行加噪（与原SSDiff完全一致）
+            noise = torch.randn_like(gt_residual)
+            x_t = self.diffusion.q_sample_xt(gt_residual, timesteps, noise=noise)
+        else:
+            # 推理时：输入为0（初始噪声残差的近似）
+            x_t = torch.zeros_like(lms)
         
         # UNet预测残差（使用forward_impl方法）
         # forward_impl(self, lms, pan, ms, x_t, timesteps)
-        # 参数说明：lms(64x64), pan(64x64), ms(16x16会被upsample), x_t(64x64)
-        residual_pred = self.unet.forward_impl(lms, pan, ms, x_t, self.timesteps)
+        # 参数说明：lms(64x64), pan(64x64), ms(16x16会被upsample), x_t(噪声残差, 64x64)
+        # 注意：x_t现在是噪声残差，与原SSDiff的输入一致
+        residual_pred = self.unet.forward_impl(lms, pan, ms, x_t, timesteps)
         
         # 检查 UNet 输出
         if torch.isnan(residual_pred).any():
@@ -210,7 +242,7 @@ class SSDiff_gen(nn.Module):
             residual = residual_pred
         else:
             # 从噪声预测计算x0（残差）
-            residual = self.diffusion._predict_xstart_from_eps(x_t, self.timesteps, residual_pred)
+            residual = self.diffusion._predict_xstart_from_eps(x_t, timesteps, residual_pred)
         
         # 最终输出 = LMS + 残差
         output = lms + residual
@@ -224,6 +256,63 @@ class SSDiff_gen(nn.Module):
         output = output.clamp(0, 1)
         
         return output, residual_pred
+    
+    def distribution_matching_loss(self, lms, pan, ms, gt):
+        """
+        🔥 OSEDiff风格的VSD (Variational Score Distillation) 损失
+        
+        核心思想：Student学习Teacher在不同噪声水平下的预测分布，而不是直接学GT
+        
+        Args:
+            lms: 低分辨率多光谱图像 [B, 8, H, W]
+            pan: 全色图像 [B, 1, H, W]
+            ms: 上采样的多光谱图像 [B, 8, H, W]
+            gt: Ground truth [B, 8, H, W]
+        
+        Returns:
+            loss_vsd: VSD损失标量
+        """
+        batch_size = lms.shape[0]
+        device = lms.device
+        
+        # 随机timestep（与forward中训练时的范围一致）
+        timesteps = torch.randint(100, 999, (batch_size,), device=device, dtype=torch.long)
+        
+        # 🔥 核心修改：使用原SSDiff的q_sample_xt（完全一致）
+        gt_residual = gt - lms  # 计算真残差
+        noise = torch.randn_like(gt_residual)
+        # 使用原SSDiff的扩散过程进行加噪
+        x_t = self.diffusion.q_sample_xt(gt_residual, timesteps, noise=noise)
+        
+        with torch.no_grad():
+            # Teacher预测（冻结，不计算梯度）
+            residual_teacher = self.unet_teacher.forward_impl(lms, pan, ms, x_t, timesteps)
+            if self.args.predict_xstart:
+                residual_teacher_final = residual_teacher
+            else:
+                residual_teacher_final = self.diffusion._predict_xstart_from_eps(x_t, timesteps, residual_teacher)
+            output_teacher = (lms + residual_teacher_final).clamp(0, 1)
+        
+        # Student预测（需要梯度）
+        residual_student = self.unet.forward_impl(lms, pan, ms, x_t, timesteps)
+        if self.args.predict_xstart:
+            residual_student_final = residual_student
+        else:
+            residual_student_final = self.diffusion._predict_xstart_from_eps(x_t, timesteps, residual_student)
+        output_student = (lms + residual_student_final).clamp(0, 1)
+        
+        # VSD损失计算（模仿OSEDiff的实现）
+        # 加权因子：基于GT和Teacher预测的差异
+        weighting_factor = torch.abs(gt - output_teacher).mean(dim=[1, 2, 3], keepdim=True) + 1e-8
+        
+        # 梯度：Student和Teacher的差异，经过weighting标准化
+        grad = (output_student - output_teacher) / weighting_factor
+        
+        # VSD损失：让Student接近Teacher的分布
+        # 使用stop_gradient技巧：gt - grad作为target，但grad不传梯度
+        loss_vsd = F.mse_loss(gt, (gt - grad).detach(), reduction="mean")
+        
+        return loss_vsd
     
     def save_model(self, save_path):
         """保存模型（只保存LoRA权重）"""
@@ -272,6 +361,9 @@ class SSDiff_reg(nn.Module):
             **args_to_dict(args, model_and_diffusion_defaults().keys())
         )
         
+        # 打印predict_xstart设置（正则化训练）
+        print(f"🔍 [SSDiff_reg 训练] predict_xstart = {args.predict_xstart}")
+        
         # 设置权重类型
         weight_dtype = torch.float32
         if accelerator.mixed_precision == "fp16":
@@ -303,8 +395,10 @@ class SSDiff_reg(nn.Module):
         # 固定在timestep=999（与主模型一致）
         timesteps = torch.full((bsz,), 999, device=device, dtype=torch.long)
         
-        # 直接从上采样的lms开始（不加噪声）
-        x_t = lms.clone()
+        # 🔥 核心修改：使用原SSDiff的q_sample_xt（完全一致）
+        noise = torch.randn_like(gt_residual)
+        # 使用原SSDiff的扩散过程进行加噪
+        x_t = self.diffusion.q_sample_xt(gt_residual, timesteps, noise=noise)
         
         # 预测残差（使用forward_impl方法）
         # 参数：lms(64x64), pan(64x64), ms(16x16会被upsample), x_t(64x64)
@@ -348,9 +442,11 @@ class SSDiff_reg(nn.Module):
         # 随机采样中间时间步
         timesteps = torch.randint(20, 980, (bsz,), device=device).long()
         
-        # 对预测结果添加噪声
-        noise = torch.randn_like(x_pred)
-        noisy_x = self.diffusion.q_sample_xt(x_pred, timesteps, noise=noise)
+        # 🔥 核心修改：对残差添加噪声（与原SSDiff一致）
+        x_pred_residual = x_pred - lms  # 预测的残差
+        noise = torch.randn_like(x_pred_residual)
+        # 使用diffusion的q_sample_xt对残差添加噪声
+        noisy_x = self.diffusion.q_sample_xt(x_pred_residual, timesteps, noise=noise)
         
         if torch.isnan(noisy_x).any():
             print(f"[distribution_matching_loss] noisy_x contains NaN after q_sample_xt!")
@@ -402,10 +498,24 @@ class SSDiff_test(nn.Module):
         self.args = args
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
+        # 对于蒸馏模式，不使用SpacedDiffusion，直接使用完整的1000步空间
+        if args.use_distillation:
+            # 临时移除 timestep_respacing，使用完整的 Gaussian Diffusion
+            original_respacing = args.timestep_respacing
+            args.timestep_respacing = ""  # 空字符串表示不使用spacing
+            print(f"📊 Using full 1000-step space for distillation (训练时使用timestep=999)")
+        
         # 创建模型和diffusion
         self.model, self.diffusion = create_model_and_diffusion(
             **args_to_dict(args, model_and_diffusion_defaults().keys())
         )
+        
+        # 恢复原始设置
+        if args.use_distillation:
+            args.timestep_respacing = original_respacing
+            
+        # 打印predict_xstart设置（测试时）
+        print(f"🔍 [SSDiff_test 测试] predict_xstart = {args.predict_xstart}")
         
         # 加载预训练权重
         if hasattr(args, 'model_path') and args.model_path:
@@ -421,8 +531,19 @@ class SSDiff_test(nn.Module):
                 
                 # 添加LoRA层
                 if 'lora_target_modules' in state_dict:
-                    # TODO: 添加LoRA层并加载权重
-                    self.model, _ = initialize_ssdiff_unet_with_lora(args, None)
+                    # 从checkpoint中读取lora_rank
+                    if 'lora_rank' in state_dict:
+                        args.lora_rank = state_dict['lora_rank']
+                        print(f"📊 Using lora_rank={args.lora_rank} from checkpoint")
+                    else:
+                        # 默认值
+                        args.lora_rank = 4
+                        print(f"⚠️  lora_rank not found in checkpoint, using default: {args.lora_rank}")
+                    
+                    # 添加LoRA层并加载权重（在基础SSDiff权重之上）
+                    self.model, _ = initialize_ssdiff_unet_with_lora(
+                        args, pretrained_path=args.pretrained_ssdiff_path
+                    )
                     
                     # 加载LoRA权重
                     for name, param in self.model.named_parameters():
@@ -434,12 +555,8 @@ class SSDiff_test(nn.Module):
                 self.model.load_state_dict(state_dict)
                 print("✅ Loaded original SSDiff weights")
         
-        # 设置权重类型
-        self.weight_dtype = torch.float32
-        if args.mixed_precision == "fp16":
-            self.weight_dtype = torch.float16
-        
-        self.model.to(self.device, dtype=self.weight_dtype)
+        # 🔥 简化模型加载，避免复杂的权重类型设置
+        self.model.to(self.device)
         
         # 设置 epoch > 1000，确保 ARConv 使用训练好的固定卷积核（reserved_NXY）
         self.model.set_epoch(10001)
@@ -460,26 +577,101 @@ class SSDiff_test(nn.Module):
         Returns:
             output: 锐化后的多光谱图像 [B, 8, H, W]
         """
-        lms = lms.to(self.device, dtype=self.weight_dtype)
-        pan = pan.to(self.device, dtype=self.weight_dtype)
-        ms = ms.to(self.device, dtype=self.weight_dtype)
+        # 🔥 确保推理模式
+        self.model.training = False
+        self.model.eval()
+        
+        # 数据类型转换（去掉混合精度）
+        lms = lms.to(self.device)
+        pan = pan.to(self.device)
+        ms = ms.to(self.device)
         
         model_kwargs = {"lms": lms, "pan": pan, "ms": ms}
         
         if self.args.use_distillation:
-            # 单步蒸馏模式
-            timesteps = torch.tensor([999], device=self.device, dtype=torch.long)
-            # 直接从MS图像开始（改进方案）
-            x_t = ms.clone()
+            # 单步蒸馏模式 - 直接调用forward_impl，不使用采样过程
+            # 与训练时的逻辑完全一致：直接前向传播，无需ddim_sample
             
-            # 单步去噪
-            noise_pred = self.model(x_t, timesteps, **model_kwargs)
-            if self.args.predict_xstart:
-                output = noise_pred
-            else:
-                output = self.diffusion._predict_xstart_from_eps(
-                    x_t, timesteps, noise_pred
-                )
+            # 使用forward_chop处理大图像
+            # 需要定义一个简单的包装函数，不使用采样
+            
+            # 用于记录第一个patch的调试信息
+            first_patch = [True]
+            
+            def direct_forward_fn(model_output, t, lms_input, **kwargs):
+                # 训练时直接使用forward_impl的输出作为残差
+                # model_output是forward_impl的输出（残差预测）
+                # lms_input是切分后的patch（64x64）
+                
+                # 打印调试信息（仅第一次）
+               
+                # 如果predict_xstart=True，model_output就是预测的x0（残差）
+                # 否则需要从eps转换为x0
+                if self.args.predict_xstart:
+                    pred_xstart = model_output
+                else:
+                    # 从kwargs稳健获取当前patch对应的x_t；若无则用0
+                    x_t = kwargs.get('noise', None)
+                    if x_t is None:
+                        x_t = torch.zeros_like(lms_input)
+                    
+                    # 确保x_t与lms_input形状匹配
+                    if x_t.shape != lms_input.shape:
+                        print(f"⚠️ 形状不匹配! x_t: {x_t.shape}, lms: {lms_input.shape}")
+                        # 重新创建与当前patch匹配的x_t
+                        x_t = torch.zeros_like(lms_input)
+                    
+                    # 构造与当前patch批大小匹配的t_batch（优先使用回调传入的t）
+                    if isinstance(t, torch.Tensor):
+                        if t.dim() == 0:
+                            t_batch = t.to(device=lms_input.device, dtype=torch.long).expand(lms_input.shape[0])
+                        else:
+                            t_batch = t.to(device=lms_input.device, dtype=torch.long)
+                    else:
+                        t_batch = torch.full((lms_input.shape[0],), 999, device=lms_input.device, dtype=torch.long)
+                    pred_xstart = self.diffusion._predict_xstart_from_eps(x_t, t_batch, model_output)
+                
+                # 最终输出 = lms_patch + 残差
+                output = lms_input + pred_xstart
+                
+                # 打印统计信息
+                print(f"   LMS patch: [{lms_input.min():.4f}, {lms_input.max():.4f}], mean={lms_input.mean():.4f}")
+                print(f"   Model output (residual): [{model_output.min():.4f}, {model_output.max():.4f}], mean={model_output.mean():.4f}")
+                print(f"   Predicted residual: [{pred_xstart.min():.4f}, {pred_xstart.max():.4f}], mean={pred_xstart.mean():.4f}")
+                print(f"   Output before clamp: [{output.min():.4f}, {output.max():.4f}], mean={output.mean():.4f}")
+                
+                return {"sample": output, "pred_xstart": pred_xstart}
+            
+            # 与训练/推理逻辑保持一致：单步蒸馏推理时使用 x_t = 0
+            xt = torch.zeros_like(lms)
+            
+            # 再次确认测试时predict_xstart设置
+            print(f"🔍 [SSDiff_test 单步蒸馏推理] predict_xstart = {self.args.predict_xstart}")
+            
+            # 可选：添加对比实验 - 使用带噪声的x_t（与训练更接近）
+            if hasattr(self.args, 'test_with_noise') and self.args.test_with_noise:
+                print("🔬 使用带噪声的x_t进行测试（更接近训练分布）")
+                # 对整张图生成一致的噪声，避免patch边界问题
+                noise = torch.randn_like(lms)
+                # 时间步固定t=999
+                t_full = torch.full((lms.shape[0],), 999, device=self.device, dtype=torch.long)
+                # 对零残差加噪
+                xt = self.diffusion.q_sample_xt(torch.zeros_like(lms), t_full, noise=noise)
+                print(f"   带噪x_t范围: [{xt.min():.4f}, {xt.max():.4f}], 均值={xt.mean():.4f}, 标准差={xt.std():.4f}")
+                        
+            # 🔥 统一使用 forward_chop 处理（支持大图像patch切分）
+            batch_size = lms.shape[0]
+            timesteps = torch.full((batch_size,), 999, device=self.device, dtype=torch.long)
+            
+            print(f"使用自定义的 forward_chop_distill 进行单步蒸馏推理")
+            
+            # 🔥 使用我们在 SSNet.py 中新添加的 forward_chop_distill 方法
+            # 这个方法直接处理输入，不需要经过复杂的 module.py 逻辑
+            output = self.model.forward_chop_distill(
+                lms, pan, ms, xt,
+                sample_fn=direct_forward_fn,
+                noise=xt,
+            )
         else:
             # 原始多步采样模式
             sample_fn = (
@@ -500,4 +692,3 @@ class SSDiff_test(nn.Module):
         output = output.clamp(0, 1)
         
         return output
-

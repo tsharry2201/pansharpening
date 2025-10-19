@@ -366,12 +366,22 @@ class SSNet(PatchMergeModule):
 
     def forward_impl(self, lms, pan, ms, x_t, timesteps):    # x:lms , y:pan
         
+
         
         emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
 
         
         x = self.upsample(ms)
         skip_c0 = x
+        
+        # 🔥 在cat之前打印形状
+        if not hasattr(self, '_debug_cat_printed'):
+            self._debug_cat_printed = True
+            print(f"\n[Step 4] 准备 cat 操作:")
+            print(f"  pan.shape (before cat) = {pan.shape}")
+            print(f"  x_t.shape (before cat) = {x_t.shape}")
+            print(f"  尝试执行: torch.cat([pan, x_t], dim=1)")
+        
         pan = torch.cat([pan, x_t], dim=1)  # 9 64 64
         pan = self.conv_pan2x_t(pan)    # 32 64 64
         
@@ -455,10 +465,17 @@ class SSNet(PatchMergeModule):
         shape = kwargs.pop('shape')
         device = args[0].device
         num_batch = args[0].shape[0]
+        lms = args[0]  # 获取lms patch
+        
         if noise is not None:
             img = noise
         else:
-            img = torch.randn(*shape, device=device)
+            # 默认从随机噪声开始，但对于单步蒸馏，应该从lms开始
+            # 如果num_timesteps=1，从lms开始（用于蒸馏）
+            if kwargs.get('num_timesteps', 1000) == 1:
+                img = lms.clone()  # 从lms patch开始（与训练一致）
+            else:
+                img = torch.randn(*shape, device=device)  # 随机噪声
         img = img[:num_batch, ...]
         kwargs['noise'] = img
         
@@ -468,8 +485,8 @@ class SSNet(PatchMergeModule):
             from tqdm.auto import tqdm
 
             self.indices = tqdm(self.indices)
-        lms = args[0]
-
+        
+        # lms已经在前面定义了，不需要再定义
         for i in self.indices:
             t = torch.tensor([i] * shape[0], device=device)
             t = t[:num_batch, ...]          
@@ -481,6 +498,127 @@ class SSNet(PatchMergeModule):
             kwargs['noise'] = img
 
         return img.contiguous()
+    
+    def forward_chop_distill(self, lms, pan, ms, xt, sample_fn, patch_size=64, batch_size=8, **kwargs):
+        """
+        专门用于单步蒸馏的 forward_chop 实现，支持大图像的 patch 切分
+        
+        Args:
+            lms: [B, 8, H, W] 低分辨率MS上采样
+            pan: [B, 1, H, W] 全色图像
+            ms: [B, 8, h, w] 原始低分辨率MS（h=H/4, w=W/4）
+            xt: [B, 8, H, W] 噪声残差
+            sample_fn: 回调函数
+            patch_size: patch 大小（默认64）
+            batch_size: 每次处理的 patch 数量（默认8）
+        """
+        import torch.nn.functional as F
+        
+        print(f"\n[DEBUG] 进入 SSNet.forward_chop_distill")
+        print(f"  输入形状: lms={lms.shape}, pan={pan.shape}, ms={ms.shape}, xt={xt.shape}")
+        
+        B, C_lms, H, W = lms.shape
+        device = lms.device
+        
+        # 如果图像小于等于 patch_size，直接处理
+        if H <= patch_size and W <= patch_size:
+            print(f"  小图像，直接处理")
+            timesteps = torch.full((B,), 999, device=device, dtype=torch.long)
+            model_output = self.forward_impl(lms, pan, ms, x_t=xt, timesteps=timesteps)
+            # 更新 kwargs 中的 noise
+            kwargs_copy = kwargs.copy()
+            kwargs_copy['noise'] = xt
+            result = sample_fn(model_output, timesteps, lms, **kwargs_copy)
+            return result['sample']
+        
+        # 大图像：进行 patch 切分
+        print(f"  大图像 ({H}x{W})，进行 patch 切分（patch_size={patch_size}）")
+        
+        # 计算 padding
+        stride = patch_size // 2
+        pad_h = (stride - (H - patch_size) % stride) % stride
+        pad_w = (stride - (W - patch_size) % stride) % stride
+        
+        # Padding 输入
+        lms_pad = F.pad(lms, (0, pad_w, 0, pad_h), mode='reflect')
+        pan_pad = F.pad(pan, (0, pad_w, 0, pad_h), mode='reflect')
+        xt_pad = F.pad(xt, (0, pad_w, 0, pad_h), mode='reflect')
+        
+        H_pad, W_pad = lms_pad.shape[2:]
+        print(f"  Padding后: {H_pad}x{W_pad}")
+        
+        # 🔥 关键修复：ms 也需要切分！
+        # ms 的尺寸是 lms 的 1/4，所以 patch_size 也要除以 4
+        ms_patch_size = patch_size // 4
+        ms_stride = stride // 4
+        
+        # Padding ms
+        _, _, h, w = ms.shape
+        ms_pad_h = (ms_stride - (h - ms_patch_size) % ms_stride) % ms_stride
+        ms_pad_w = (ms_stride - (w - ms_patch_size) % ms_stride) % ms_stride
+        ms_pad = F.pad(ms, (0, ms_pad_w, 0, ms_pad_h), mode='reflect')
+        
+        # 使用 unfold 切分 patches
+        lms_patches = F.unfold(lms_pad, kernel_size=patch_size, stride=stride)  # [B, C*ps*ps, num_patches]
+        pan_patches = F.unfold(pan_pad, kernel_size=patch_size, stride=stride)
+        xt_patches = F.unfold(xt_pad, kernel_size=patch_size, stride=stride)
+        ms_patches = F.unfold(ms_pad, kernel_size=ms_patch_size, stride=ms_stride)  # ms 的 patch 更小
+        
+        num_patches = lms_patches.shape[2]
+        print(f"  切分成 {num_patches} 个 patches (lms: {patch_size}x{patch_size}, ms: {ms_patch_size}x{ms_patch_size})")
+        
+        # Reshape patches: [B, C, ps, ps, num_patches] -> [num_patches, C, ps, ps]
+        lms_patches = lms_patches.view(B, C_lms, patch_size, patch_size, num_patches).permute(4, 0, 1, 2, 3).squeeze(1)
+        pan_patches = pan_patches.view(B, 1, patch_size, patch_size, num_patches).permute(4, 0, 1, 2, 3).squeeze(1)
+        xt_patches = xt_patches.view(B, C_lms, patch_size, patch_size, num_patches).permute(4, 0, 1, 2, 3).squeeze(1)
+        ms_patches = ms_patches.view(B, C_lms, ms_patch_size, ms_patch_size, num_patches).permute(4, 0, 1, 2, 3).squeeze(1)
+        
+        # 处理每个 patch
+        output_patches = []
+        timesteps = torch.full((batch_size,), 999, device=device, dtype=torch.long)
+        
+        for i in range(0, num_patches, batch_size):
+            end_idx = min(i + batch_size, num_patches)
+            curr_batch = end_idx - i
+            
+            lms_batch = lms_patches[i:end_idx]
+            pan_batch = pan_patches[i:end_idx]
+            xt_batch = xt_patches[i:end_idx]
+            ms_batch = ms_patches[i:end_idx]  # 🔥 使用对应的 ms patch
+            
+            # 调整 timesteps 大小
+            ts_batch = timesteps[:curr_batch]
+            
+            # 调用 forward_impl，传入对应的 ms patch
+            model_output = self.forward_impl(lms_batch, pan_batch, ms_batch, x_t=xt_batch, timesteps=ts_batch)
+            
+            # 调用回调（注意：不要重复传 noise，已经在 kwargs 中了）
+            # 临时更新 kwargs 中的 noise 为当前 batch 的 xt
+            kwargs_batch = kwargs.copy()
+            kwargs_batch['noise'] = xt_batch
+            result = sample_fn(model_output, ts_batch, lms_batch, **kwargs_batch)
+            output_patches.append(result['sample'])
+        
+        # 合并 patches
+        output_patches = torch.cat(output_patches, dim=0)  # [num_patches, C, ps, ps]
+        
+        # Reshape回去: [num_patches, C, ps, ps] -> [B, C*ps*ps, num_patches]
+        output_patches = output_patches.unsqueeze(1).permute(1, 2, 3, 4, 0).reshape(B, -1, num_patches)
+        
+        # 使用 fold 重建图像
+        output = F.fold(output_patches, output_size=(H_pad, W_pad), kernel_size=patch_size, stride=stride)
+        
+        # 计算重叠次数并平均
+        ones = torch.ones_like(lms_pad)
+        ones_patches = F.unfold(ones, kernel_size=patch_size, stride=stride)
+        divisor = F.fold(ones_patches, output_size=(H_pad, W_pad), kernel_size=patch_size, stride=stride)
+        output = output / divisor
+        
+        # 裁剪回原始尺寸
+        output = output[:, :, :H, :W]
+        
+        print(f"  输出形状: {output.shape}")
+        return output
 
     
 def summaries(model, grad=False):

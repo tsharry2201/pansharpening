@@ -158,9 +158,15 @@ class GaussianDiffusion:
         )
         # log calculation clipped because the posterior variance is 0 at the
         # beginning of the diffusion chain.
-        self.posterior_log_variance_clipped = np.log(
-            np.append(self.posterior_variance[1], self.posterior_variance[1:])
-        )
+        if len(self.posterior_variance) > 1:
+            self.posterior_log_variance_clipped = np.log(
+                np.append(self.posterior_variance[1], self.posterior_variance[1:])
+            )
+        else:
+            # For single-step sampling, use the first (and only) variance
+            self.posterior_log_variance_clipped = np.log(
+                np.maximum(self.posterior_variance, 1e-20)
+            )
         self.posterior_mean_coef1 = (
             betas * np.sqrt(self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod)
         )
@@ -313,20 +319,23 @@ class GaussianDiffusion:
                 model_log_variance = frac * max_log + (1 - frac) * min_log
                 model_variance = th.exp(model_log_variance)
         else:
-            model_variance, model_log_variance = {
-                # for fixedlarge, we set the initial (log-)variance like so
-                # to get a better decoder log likelihood.
-                ModelVarType.FIXED_LARGE: (
-                    np.append(self.posterior_variance[1], self.betas[1:]),
-                    np.log(np.append(self.posterior_variance[1], self.betas[1:])),
-                ),
-                ModelVarType.FIXED_SMALL: (
-                    self.posterior_variance,
-                    self.posterior_log_variance_clipped,
-                ),
-            }[self.model_var_type]
-            model_variance = _extract_into_tensor(model_variance, t, x.shape)
-            model_log_variance = _extract_into_tensor(model_log_variance, t, x.shape)
+            # 处理单步采样的特殊情况
+            if self.model_var_type == ModelVarType.FIXED_LARGE:
+                if len(self.posterior_variance) > 1:
+                    model_variance_np = np.append(self.posterior_variance[1], self.betas[1:])
+                    model_log_variance_np = np.log(np.append(self.posterior_variance[1], self.betas[1:]))
+                else:
+                    # 单步采样时使用第一个variance
+                    model_variance_np = self.posterior_variance
+                    model_log_variance_np = np.log(np.maximum(self.posterior_variance, 1e-20))
+            elif self.model_var_type == ModelVarType.FIXED_SMALL:
+                model_variance_np = self.posterior_variance
+                model_log_variance_np = self.posterior_log_variance_clipped
+            else:
+                raise NotImplementedError(self.model_var_type)
+            
+            model_variance = _extract_into_tensor(model_variance_np, t, x.shape)
+            model_log_variance = _extract_into_tensor(model_log_variance_np, t, x.shape)
 
         def process_xstart(x, lms):
             if denoised_fn is not None:
