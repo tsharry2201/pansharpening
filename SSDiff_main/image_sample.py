@@ -29,7 +29,7 @@ rootPath = os.path.abspath(os.path.dirname(__file__))
 
 
 def main(
-    device='cuda:5',
+    device='cuda:4',
     crop_batch_size=8,
     timestep_respacing="ddim10",
     test_dataset=None  # 新增：指定测试数据集

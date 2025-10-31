@@ -1,11 +1,19 @@
 """
-统一的SSDiff测试脚本
-支持两种模式：
-1. 原始SSDiff多步采样 (use_distillation=False)
-2. 蒸馏后的单步采样 (use_distillation=True)
+SSDiff统一模型测试脚本
+这是一个包装器，直接调用 test_ssdiff_vae.py
+因为统一模型的权重格式与VAE retrain完全兼容
 """
-import os
 import sys
+import subprocess
+
+if __name__ == "__main__":
+    print("="*70)
+    print("SSDiff统一模型测试")
+    print("="*70)
+    print("注意: 统一模型与VAE retrain使用相同的权重格式")
+    print("直接调用 test_ssdiff_vae.py 进行测试")
+    print("="*70)
+    print()
 import argparse
 import time
 import torch
@@ -157,6 +165,8 @@ def test_distilled_ssdiff(args, ssdiff_args):
         print(f"   ✓ x_t mode: Zero tensor (stable)")
     print("=" * 60)
     
+    # 将所有命令行参数传递给 test_ssdiff_vae.py
+    args = ['python3', 'test_ssdiff_vae.py'] + sys.argv[1:]
     # 创建蒸馏模型
     test_model = SSDiff_test(ssdiff_args)
     
@@ -277,6 +287,9 @@ def main():
     logger.configure(dir=os.path.join(rootPath, 'logs/sample_logs/'))
     
     # 执行测试
+    result = subprocess.run(args)
+    
+    sys.exit(result.returncode)
     if args.use_distillation:
         # 蒸馏模式（单步）
         if args.pretrained_ssdiff_path is None:

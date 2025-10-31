@@ -37,8 +37,9 @@ def set_seed(seed):
     
 
 def main(
-    device='cuda:6',
-    Resume = False
+    device='cuda:0',
+    Resume = False,
+    resume_epoch = 0  # 继续训练时设置正确的epoch值
     ):
     
     args = parser_args()
@@ -48,7 +49,7 @@ def main(
     torch.cuda.set_device(args.device)
     
     # 设置最大训练步数为12万
-    args.lr_anneal_steps = 120000
+    args.lr_anneal_steps = 1200000
     
     # 初始化wandb
     run_dir = os.path.join("runs", datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
@@ -107,6 +108,7 @@ def main(
         weight_decay=args.weight_decay,
         lr_anneal_steps=args.lr_anneal_steps,
         rootPath=rootPath,
+        resume_epoch=resume_epoch,  # 传递resume_epoch
     ).run_loop()
     
     # 完成wandb记录
@@ -114,4 +116,12 @@ def main(
 
 
 if __name__ == "__main__":
-    main()
+    # ============ 继续训练模式 ============
+    # 1. 在 configs/option_DPM_pansharpening.py 中设置 ckpt_model_path
+    # 2. 设置 resume_epoch > 5000 以保护ARConv的reserved_NXY不被覆盖
+    # 3. 建议降低学习率 (lr=1e-4 或 1e-5)
+    # 示例：
+    main(device='cuda:2', Resume=True, resume_epoch=120000)
+    
+    # ============ 正常训练模式 ============
+    #main()

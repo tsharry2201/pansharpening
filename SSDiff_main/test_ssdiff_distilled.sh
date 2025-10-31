@@ -7,7 +7,7 @@
 DISTILLED_MODEL="./experiments/ssdiff_distill_20251018_221733/checkpoints/model_10000.pkl"
 # 232238是改进后的蒸馏模型，但出现loss一直没降下来  第二次修改版是165605  第三次修改了加噪模式，但未使用 microbarch 221733
 # 原始预训练SSDiff（用于加载基础权重）
-PRETRAINED_SSDIFF="/data2/user/zelilin/ARConv_SSDiff/SSDiff_main/results/10-15-22-29/model065000.pt"
+PRETRAINED_SSDIFF="/home/zelilin/data/pansharpening/SSDiff_main/results/10-15-22-29/model065000.pt"
 
 # 测试配置
 TEST_DATASET="test_wv3_multiExm1.h5"  # 或 test_wv3_OrigScale_multiExm1.h5

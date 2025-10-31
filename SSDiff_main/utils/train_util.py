@@ -44,6 +44,7 @@ class TrainLoop:
         weight_decay=0.0,
         lr_anneal_steps=0,
         rootPath=None,
+        resume_epoch=0,  # 新增：继续训练时的epoch值
     ):
         self.model = model
         self.diffusion = diffusion
@@ -66,6 +67,7 @@ class TrainLoop:
         self.weight_decay = weight_decay
         self.lr_anneal_steps = lr_anneal_steps
         self.rootPath = rootPath
+        self.resume_epoch = resume_epoch  # 保存resume_epoch
 
         self.step = 0
         self.resume_step = 0
@@ -146,7 +148,7 @@ class TrainLoop:
         self.model.convert_to_fp16()
 
     def run_loop(self):
-        epoch = 0
+        epoch = self.resume_epoch  # 从resume_epoch开始，而不是从0开始
         while (
             not self.lr_anneal_steps
             or self.step + self.resume_step < self.lr_anneal_steps

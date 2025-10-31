@@ -4,23 +4,22 @@
 
 # ============ 配置参数 ============
 # 预训练SSDiff模型路径
-PRETRAINED_SSDIFF="/data2/user/zelilin/ARConv_SSDiff/SSDiff_main/results/10-14-22-28/model065000.pt"
+PRETRAINED_SSDIFF="/home/zelilin/data/pansharpening/SSDiff_main/results/10-14-22-28/model065000.pt"
 
 # 数据集路径
-DATA_DIR="/data2/user/zelilin/ARConv_SSDiff/SSDiff_main/dataset"
+DATA_DIR="/home/zelilin/data/pansharpening/SSDiff_main/dataset"
 
 # 输出目录
 OUTPUT_DIR="experiments/ssdiff_distill_$(date +%Y%m%d_%H%M%S)"
 
 # GPU设置
-GPUS="4,6,7"  # 使用的GPU编号
+GPUS="0,2,3"  # 使用的GPU编号
 
-# ============ 优化的训练参数 ============
-BATCH_SIZE=20              # 🔥 降低batch size避免OOM (从8降到4)
-GRADIENT_ACCUM_STEPS=1    # 🔥 使用梯度累积，有效batch=12
-LEARNING_RATE=1e-5        # 🔥 BATCH_SIZE=20时使用原SSDiff的学习率
-MAX_STEPS=120000
-CHECKPOINT_STEPS=200      # 🔥 每200步保存checkpoint
+# ============ 训练参数 ============
+BATCH_SIZE=2
+LEARNING_RATE=5e-5
+MAX_STEPS=60000
+CHECKPOINT_STEPS=500
 LORA_RANK=4
 
 # 🔥 平衡的损失权重配置

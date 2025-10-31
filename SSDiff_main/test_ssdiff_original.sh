@@ -3,7 +3,7 @@
 # 使用方法: bash scripts/test_ssdiff_original.sh
 
 # ============ 配置参数 ============
-MODEL_PATH="/data2/user/zelilin/ARConv_SSDiff/SSDiff_main/results/10-15-22-29/model065000.pt"
+MODEL_PATH="/home/zelilin/data/pansharpening/SSDiff_main/results/10-15-22-29/model065000.pt"
 TIMESTEP_RESPACING="ddim10"  # ddim1, ddim10, ddim50, ddim100等
 TEST_DATASET="test_wv3_multiExm1.h5"  # 或 test_wv3_OrigScale_multiExm1.h5
 NUM_IMAGES=20
