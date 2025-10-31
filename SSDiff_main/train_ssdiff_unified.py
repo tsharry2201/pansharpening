@@ -51,6 +51,10 @@ def parse_args(input_args=None):
                        help="L1损失权重（mixed模式）")
     parser.add_argument("--lambda_vsd", type=float, default=1.0,
                        help="VSD损失权重（mixed模式）")
+    parser.add_argument("--lambda_distribution", type=float, default=1.0,
+                       help="分布匹配损失权重（蒸馏一致性）")
+    parser.add_argument("--lambda_diff", type=float, default=1.0,
+                       help="扩散一致性损失权重（单步蒸馏）")
     
     # 训练参数
     parser.add_argument("--seed", type=int, default=123)
@@ -85,6 +89,8 @@ def parse_args(input_args=None):
     parser.add_argument("--lambda_kl", type=float, default=0.001)
     parser.add_argument("--use_perceptual_loss", type=lambda x: str(x).lower() == 'true', default=False)
     parser.add_argument("--lambda_perceptual", type=float, default=0.1)
+    
+    parser.add_argument("--use_scene_token", type=lambda x: str(x).lower() == 'true', default=False)
     
     # ControlNet配置
     parser.add_argument("--use_controlnet", type=lambda x: str(x).lower() == 'true', default=False)
@@ -408,12 +414,36 @@ def main(args):
                     loss_dict = {
                         'l1_loss': loss_dict_l1.get('l1_loss', 0.0),
                         'vsd_loss': loss_dict_vsd.get('vsd_loss', 0.0),
-                        'total_loss': total_loss.item(),
                     }
                     if 'kl_loss' in loss_dict_l1:
                         loss_dict['kl_loss'] = loss_dict_l1['kl_loss']
                     if 'perceptual_loss' in loss_dict_l1:
                         loss_dict['perceptual_loss'] = loss_dict_l1['perceptual_loss']
+
+                # 蒸馏相关的附加损失
+                use_distribution_loss = args.loss_mode in ("vsd", "mixed") and args.lambda_distribution > 0
+                if use_distribution_loss:
+                    loss_dist, _, loss_dict_dist = unwrapped_model.distribution_matching_loss(lms, pan, ms, gt)
+                    total_loss = total_loss + args.lambda_distribution * loss_dist
+                    loss_dict['distribution_matching_loss'] = loss_dict_dist.get(
+                        'distribution_matching_loss', loss_dist.detach().item()
+                    )
+                    loss_dict['distribution_matching_loss_weighted'] = (
+                        args.lambda_distribution * loss_dist
+                    ).detach().item()
+
+                use_diffusion_loss = args.loss_mode in ("vsd", "mixed") and args.lambda_diff > 0
+                if use_diffusion_loss:
+                    loss_diff, _, loss_dict_diff = unwrapped_model.diff_loss(lms, pan, ms, gt)
+                    total_loss = total_loss + args.lambda_diff * loss_diff
+                    loss_dict['diff_loss'] = loss_dict_diff.get(
+                        'diff_loss', loss_diff.detach().item()
+                    )
+                    loss_dict['diff_loss_weighted'] = (
+                        args.lambda_diff * loss_diff
+                    ).detach().item()
+                
+                loss_dict['total_loss'] = total_loss.detach().item()
                 
                 # 反向传播
                 accelerator.backward(total_loss)
@@ -489,4 +519,3 @@ if __name__ == "__main__":
     )
     
     main(args)
-

@@ -227,7 +227,6 @@ def initialize_ssdiff_unet_with_lora(args, pretrained_path=None):
         student_args_dict['use_arconv'] = getattr(args, 'use_arconv', False)
     if 'use_scene_token' in student_args_dict:
         student_args_dict['use_scene_token'] = getattr(args, 'use_scene_token', False)
-    print(student_args_dict['use_scene_token'])
     model, _ = create_model_and_diffusion(**student_args_dict)
     
     if pretrained_path is not None and os.path.exists(pretrained_path):
