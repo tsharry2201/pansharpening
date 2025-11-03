@@ -1,3 +1,4 @@
+
 """
 SSDiff一步蒸馏模型
 模仿OSEDiff的训练范式，将多步SSDiff蒸馏为单步模型
@@ -174,6 +175,9 @@ class SSDiff_gen(nn.Module):
         
         self.lora_rank = args.lora_rank
         self.training = True  # 添加training标志
+        
+        self.unet_teacher.set_epoch(10001)
+        self.unet.set_epoch(10001)
     
     def set_train(self):
         """设置训练模式，只有LoRA层可训练"""
@@ -371,6 +375,9 @@ class SSDiff_reg(nn.Module):
         elif accelerator.mixed_precision == "bf16":
             weight_dtype = torch.bfloat16
         self.weight_dtype = weight_dtype
+        
+        self.unet_fix.set_epoch(10001)
+        self.unet_update.set_epoch(10001)
     
     def set_train(self):
         """设置训练模式"""

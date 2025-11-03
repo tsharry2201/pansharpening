@@ -1,15 +1,14 @@
 """
-SSDiff统一训练模型
-结合VAE/ControlNet/CLIP/RAM模块和蒸馏学习（VSD loss）
-支持：
-1. 直接监督学习（L1 loss）
-2. 知识蒸馏（VSD loss from teacher）
-3. 混合训练（L1 + VSD）
+SSDiff一步蒸馏训练脚本
+模仿OSEDiff的训练范式
 """
 import os
 import sys
+import argparse
+import datetime
+import socket
+import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
 from tqdm.auto import tqdm
 from pathlib import Path
@@ -474,4 +473,3 @@ if __name__ == "__main__":
     )
     
     main(args)
-

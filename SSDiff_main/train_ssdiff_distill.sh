@@ -4,7 +4,7 @@
 
 # ============ 配置参数 ============
 # 预训练SSDiff模型路径
-PRETRAINED_SSDIFF="/home/zelilin/data/pansharpening/SSDiff_main/results/10-14-22-28/model065000.pt"
+PRETRAINED_SSDIFF="/home/zelilin/data/pansharpening/SSDiff_main/results/10-18-13-11/model120000.pt"
 
 # 数据集路径
 DATA_DIR="/home/zelilin/data/pansharpening/SSDiff_main/dataset"
@@ -13,14 +13,15 @@ DATA_DIR="/home/zelilin/data/pansharpening/SSDiff_main/dataset"
 OUTPUT_DIR="experiments/ssdiff_distill_$(date +%Y%m%d_%H%M%S)"
 
 # GPU设置
-GPUS="0,2,3"  # 使用的GPU编号
+GPUS="3,4,5"  # 使用的GPU编号
 
 # ============ 训练参数 ============
-BATCH_SIZE=2
+BATCH_SIZE=24
 LEARNING_RATE=5e-5
 MAX_STEPS=60000
 CHECKPOINT_STEPS=500
 LORA_RANK=4
+GRADIENT_ACCUMULATION_STEPS=4
 
 # 🔥 平衡的损失权重配置
 LAMBDA_L2=2.0             # 强化L1重建损失
@@ -70,7 +71,7 @@ CUDA_VISIBLE_DEVICES="$GPUS" accelerate launch train_ssdiff_distill.py \
     --output_dir "$OUTPUT_DIR" \
     --seed 123 \
     --train_batch_size $BATCH_SIZE \
-    --gradient_accumulation_steps $GRADIENT_ACCUM_STEPS \
+    --gradient_accumulation_steps $GRADIENT_ACCUMULATION_STEPS \
     --learning_rate $LEARNING_RATE \
     --max_train_steps $MAX_STEPS \
     --checkpointing_steps $CHECKPOINT_STEPS \

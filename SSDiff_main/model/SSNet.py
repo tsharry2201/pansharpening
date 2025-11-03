@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import numpy as np
 from matplotlib import pyplot as plt
 from model.fusformer import Fusformer
@@ -13,80 +12,6 @@ from model.nn import (
     timestep_embedding,
 )
 from model.ARConv import ARConv
-import math
-
-
-class CrossAttention(nn.Module):
-    """
-    Cross-Attention层，用于CLIP文本特征注入
-    参考OSEDiff的实现方式
-    
-    注意：为了兼容旧模型，我们使用了以下策略：
-    1. 延迟初始化cross-attention层，仅在需要时创建
-    2. 使用register_buffer而不是Parameter存储门控参数，避免出现在state_dict中
-    3. 添加错误处理，确保即使出错也能优雅降级
-    """
-    def __init__(self, query_dim, context_dim=None, heads=8, dim_head=64, dropout=0.0):
-        super().__init__()
-        inner_dim = dim_head * heads
-        context_dim = context_dim or query_dim
-        
-        self.heads = heads
-        self.dim_head = dim_head
-        self.scale = dim_head ** -0.5
-        
-        self.to_q = nn.Linear(query_dim, inner_dim, bias=False)
-        self.to_k = nn.Linear(context_dim, inner_dim, bias=False)
-        self.to_v = nn.Linear(context_dim, inner_dim, bias=False)
-        
-        self.to_out = nn.Sequential(
-            nn.Linear(inner_dim, query_dim),
-            nn.Dropout(dropout)
-        )
-    
-    def forward(self, x, context=None):
-        """
-        Args:
-            x: [B, C, H, W] 图像特征
-            context: [B, seq_len, context_dim] 文本特征（CLIP输出）
-        Returns:
-            out: [B, C, H, W] 注入文本特征后的图像特征
-        """
-        if context is None:
-            return x
-            
-        B, C, H, W = x.shape
-        
-        # 将图像特征reshape为序列: [B, C, H, W] -> [B, H*W, C]
-        x_flat = x.view(B, C, H * W).permute(0, 2, 1)  # [B, H*W, C]
-        
-        # 计算Q, K, V
-        q = self.to_q(x_flat)  # [B, H*W, inner_dim]
-        k = self.to_k(context)  # [B, seq_len, inner_dim]
-        v = self.to_v(context)  # [B, seq_len, inner_dim]
-        
-        # 多头attention
-        q = q.view(B, H * W, self.heads, self.dim_head).transpose(1, 2)  # [B, heads, H*W, dim_head]
-        k = k.view(B, -1, self.heads, self.dim_head).transpose(1, 2)     # [B, heads, seq_len, dim_head]
-        v = v.view(B, -1, self.heads, self.dim_head).transpose(1, 2)     # [B, heads, seq_len, dim_head]
-        
-        # Attention计算
-        attn = torch.matmul(q, k.transpose(-2, -1)) * self.scale  # [B, heads, H*W, seq_len]
-        attn = F.softmax(attn, dim=-1)
-        
-        # 应用attention到值
-        out = torch.matmul(attn, v)  # [B, heads, H*W, dim_head]
-        out = out.transpose(1, 2).reshape(B, H * W, -1)  # [B, H*W, inner_dim]
-        
-        # 输出投影
-        out = self.to_out(out)  # [B, H*W, C]
-        
-        # Reshape回图像格式
-        out = out.permute(0, 2, 1).view(B, C, H, W)  # [B, C, H, W]
-        
-        return out
-
-
 def init_weights(*modules):
     for module in modules:
         for m in module.modules():
@@ -142,15 +67,15 @@ class ResBlock(nn.Module):
         dims=2,
         use_scale_shift_norm=False,
         use_arconv=False,
-        arconv_hw_range=[1,9],
-        arconv_fixstep=4000  # 🔥 添加fixstep参数
+        arconv_hw_range=[1,9]
+        
     ):
         super().__init__()
         self.use_arconv = use_arconv
         self.arconv_hw_range = arconv_hw_range
         if use_arconv:
-            self.conv0 = ARConv(in_channels, hidden_channels, 3, 1, 1, arconv_fixstep=arconv_fixstep)
-            self.conv1 = ARConv(hidden_channels, out_channels, 3, 1, 1, arconv_fixstep=arconv_fixstep)
+            self.conv0 = ARConv(in_channels, hidden_channels, 3, 1, 1)
+            self.conv1 = ARConv(hidden_channels, out_channels, 3, 1, 1)
         else:
             self.conv0 = nn.Conv2d(in_channels, hidden_channels, 3, 1, 1)
             self.conv1 = nn.Conv2d(hidden_channels, out_channels, 3, 1, 1)
@@ -176,16 +101,6 @@ class ResBlock(nn.Module):
             ),
         )
         
-        # 中层门控参数：用于scene token注入
-        self.scene_gate = nn.Parameter(torch.zeros(1), requires_grad=True)
-        self.control_gate = nn.Parameter(torch.zeros(1), requires_grad=True)
-        
-        self.text_gate = nn.Parameter(torch.zeros(1), requires_grad=True)
-        self.text_proj = None
-        
-        # 使用register_buffer而不是Parameter，避免出现在state_dict中
-        self.register_buffer('attn_gate', torch.zeros(1), persistent=False)
-        
     def time_emb(self, h, emb):
         emb_out = self.emb_layers(emb).type(h.dtype)
         while len(emb_out.shape) < len(h.shape):
@@ -202,7 +117,7 @@ class ResBlock(nn.Module):
         return h
     
     
-    def forward(self, x, emb, epoch=0, scene_token=None, control_feature=None, encoder_hidden_states=None):
+    def forward(self, x, emb,epoch=0):         # 32 64 64
         if self.use_arconv:
             rs1 = self.relu(self.conv0(x, epoch, self.arconv_hw_range))
             rs1 = self.conv1(rs1, epoch, self.arconv_hw_range)
@@ -210,64 +125,7 @@ class ResBlock(nn.Module):
             rs1 = self.relu(self.conv0(x))
             rs1 = self.conv1(rs1)
             
-        rs1 = self.time_emb(rs1, emb) #修改为先emb
-        
-        # 场景特征注入（如果有）
-        if scene_token is not None and hasattr(self, 'scene_gate'):
-            if not hasattr(self, 'scene_proj'):
-                token_dim = scene_token.shape[-1]
-                hidden_dim = rs1.shape[1]
-                self.scene_proj = nn.Linear(token_dim, hidden_dim).to(rs1.device)
-            scene_emb = self.scene_proj(scene_token)
-            scene_emb = scene_emb.unsqueeze(-1).unsqueeze(-1)
-            rs1 = rs1 + self.scene_gate * scene_emb
-        
-        # ControlNet特征注入
-        if control_feature is not None:
-            # 确保特征形状与当前特征匹配
-            if control_feature.shape[2:] != rs1.shape[2:]:
-                control_feature = F.interpolate(
-                    control_feature, 
-                    size=rs1.shape[2:], 
-                    mode='bilinear', 
-                    align_corners=False
-                )
-            # 如果通道数不匹配，使用1x1卷积进行调整
-            if control_feature.shape[1] != rs1.shape[1]:
-                if not hasattr(self, 'control_proj'):
-                    self.control_proj = nn.Conv2d(
-                        control_feature.shape[1], 
-                        rs1.shape[1], 
-                        kernel_size=1
-                    ).to(rs1.device)
-                control_feature = self.control_proj(control_feature)
-            control_feature = F.group_norm(control_feature, num_groups=16) # 添加
-            # 添加控制特征
-            #print(control_feature)
-            rs1 = rs1 +  control_feature
-        
-        # CLIP文本特征注入
-        if encoder_hidden_states is not None:
-            if self.text_proj is None:
-                context_dim = encoder_hidden_states.shape[-1]  # 通常 768
-                self.text_proj = nn.Linear(context_dim, rs1.shape[1]).to(rs1.device)
-
-            # 简单池化文本：mean-pool（也可改为 CLS 取 [ :,0,: ]）
-            text_vec = encoder_hidden_states.mean(dim=1)          # [B, D]
-            text_vec = self.text_proj(text_vec)                    # [B, C]
-            text_vec = F.layer_norm(text_vec, text_vec.shape[-1:]) 
-            text_vec = text_vec.unsqueeze(-1).unsqueeze(-1)        # [B, C, 1, 1]
-
-            # 门控注入：使用sigmoid激活，让值在合理范围内
-            # text_gate初始为0时，sigmoid(0)=0.5，有一定的初始影响
-            gate_value = torch.sigmoid(self.text_gate)
-            if self.training and hasattr(self, '_print_gate_counter'):
-                self._print_gate_counter = getattr(self, '_print_gate_counter', 0) + 1
-                if self._print_gate_counter % 100 == 0:
-                    print(f"[CLIP Gate] raw={self.text_gate.item():.6f}, sigmoid={gate_value.item():.6f}, impact={(gate_value * text_vec).abs().mean().item():.6f}")
-            rs1 = rs1 +  gate_value * text_vec
-            
-            
+        rs1 = self.time_emb(rs1, emb)
         rs = torch.add(x, rs1)
         return rs
 
@@ -351,12 +209,7 @@ class SSNet(PatchMergeModule):
         device='cpu',
         norm_type="bn",
         crop_batch_size=1,
-        use_scale_shift_norm=False,
-        use_arconv=False,  
-        arconv_hw_range=[1, 9],  
-        use_scene_token=True, 
-        arconv_fixstep=4000,  
-        scene_token_freeze_steps=300  
+        use_scale_shift_norm=False
     ):
         super().__init__(True, crop_batch_size, [64, 64, 16], device=device)
         ms_dim = ms_dim  # qb:4, gf2,  wv3:8
@@ -364,11 +217,6 @@ class SSNet(PatchMergeModule):
         pan_dim = pan_dim
         self.model_channels = model_channels
         self.use_scale_shift_norm = use_scale_shift_norm
-        self.use_arconv = use_arconv  
-        self.arconv_hw_range = arconv_hw_range
-        self.use_scene_token = use_scene_token  
-        self.arconv_fixstep = arconv_fixstep  
-        self.scene_token_freeze_steps = scene_token_freeze_steps  
         self.device = device
         self.current_epoch = 0
         self.relu = nn.LeakyReLU()
@@ -392,21 +240,6 @@ class SSNet(PatchMergeModule):
             SiLU(),
             linear(time_embed_dim, time_embed_dim),
         )
-        
-        # Scene Token集成：使用门控注入（FiLM风格）
-        # 门控参数alpha初始化为0，确保"恒等起步"
-        # 注意：Teacher模型不应该创建这个层（use_scene_token=False）
-        if self.use_scene_token:
-            self.scene_embed = nn.Sequential(
-                linear(256, time_embed_dim),  # 256是SceneTokenExtractor的默认输出维度
-                SiLU(),
-                linear(time_embed_dim, time_embed_dim)
-            )
-            # 门控参数：alpha * scene_emb，alpha从0开始
-            self.scene_gate = nn.Parameter(torch.zeros(1), requires_grad=True)
-        else:
-            self.scene_embed = None 
-            self.scene_gate = None
 
         self.conv_lms2x_t = nn.Conv2d(ms_dim*2, dim, 3, 1, 1)    # 16 32
         self.conv_pan2x_t = nn.Conv2d(ms_dim+pan_dim, dim, 3, 1, 1)    # 9 32
@@ -421,31 +254,23 @@ class SSNet(PatchMergeModule):
         # layer 0
         self.fusformer0 = Fusformer(dim0, dim0//dim_head, dim_head, int(dim0*se_ratio_mlp))
         self.down0 = Down(dim0, dim1)
-        self.resblock0 = ResBlock(dim0, int(se_ratio_rb*dim0), dim0, 
-                                  model_channels=self.model_channels, use_scale_shift_norm=use_scale_shift_norm,
-                                  use_arconv=self.use_arconv, arconv_hw_range=self.arconv_hw_range,
-                                  arconv_fixstep=self.arconv_fixstep) # 32 16 32 128
+        self.resblock0 = ResBlock(dim0, int(se_ratio_rb*dim0), dim0,
+                                  model_channels=self.model_channels, use_scale_shift_norm=use_scale_shift_norm,use_arconv=True,arconv_hw_range=[1,9]) # 32 16 32 128
  
         # layer 1
         self.fusformer1 = Fusformer(dim1, dim1//dim_head, dim_head, int(dim1*se_ratio_mlp))
         self.down1 = Down(dim1, dim2)
-        self.resblock1 = ResBlock(dim1, int(se_ratio_rb*dim1), dim1, use_scale_shift_norm=use_scale_shift_norm,
-                                 use_arconv=self.use_arconv, arconv_hw_range=self.arconv_hw_range,
-                                 arconv_fixstep=self.arconv_fixstep)
+        self.resblock1 = ResBlock(dim1, int(se_ratio_rb*dim1), dim1, use_scale_shift_norm=use_scale_shift_norm,use_arconv=True,arconv_hw_range=[1,9])
 
         # layer 2
         self.fusformer2 = Fusformer(dim2, dim2//dim_head, dim_head, int(dim2*se_ratio_mlp))
         self.up0 = Up(dim2, dim3)
-        self.resblock2 = ResBlock(dim2, int(se_ratio_rb*dim2), dim2, use_scale_shift_norm=use_scale_shift_norm,
-                                 use_arconv=self.use_arconv, arconv_hw_range=self.arconv_hw_range,
-                                 arconv_fixstep=self.arconv_fixstep)
+        self.resblock2 = ResBlock(dim2, int(se_ratio_rb*dim2), dim2, use_scale_shift_norm=use_scale_shift_norm,use_arconv=True,arconv_hw_range=[1,9])
 
         # layer 3
         self.fusformer3 = Fusformer(dim3, dim3//dim_head, dim_head, int(dim3*se_ratio_mlp))
         self.up1 = Up(dim3, dim4)
-        self.resblock3 = ResBlock(dim3, int(se_ratio_rb*dim3), dim3, use_scale_shift_norm=use_scale_shift_norm,
-                                 use_arconv=self.use_arconv, arconv_hw_range=self.arconv_hw_range,
-                                 arconv_fixstep=self.arconv_fixstep)
+        self.resblock3 = ResBlock(dim3, int(se_ratio_rb*dim3), dim3, use_scale_shift_norm=use_scale_shift_norm,use_arconv=True,arconv_hw_range=[1,9])
 
         # layer 4
         self.fusformer4 = Fusformer(dim4, dim4//dim_head, dim_head, int(dim4*se_ratio_mlp))
@@ -539,37 +364,17 @@ class SSNet(PatchMergeModule):
         x_filtered = x_filtered.type(dtype)
         return x_filtered
 
-    def forward_impl(self, lms, pan, ms, x_t, timesteps, scene_token=None, control_features=None, encoder_hidden_states=None, epoch=0):    # x:lms , y:pan
-        """
-        前向传播实现
+    def forward_impl(self, lms, pan, ms, x_t, timesteps):    # x:lms , y:pan
         
-        Args:
-            lms: 低分辨率多光谱 [B, 8, H, W]
-            pan: 全色图像 [B, 1, H, W]
-            ms: 上采样多光谱 [B, 8, H, W]
-            x_t: 噪声残差 [B, 8, H, W]
-            timesteps: 时间步 [B]
-            scene_token: 场景条件token [B, 256] (可选)
-            control_features: ControlNet特征字典 (可选)
-            encoder_hidden_states: CLIP文本嵌入 [B, seq_len, 768] (可选)
-            epoch: 当前训练步数/epoch (用于ARConv的fixstep判断)
-        """
-        # Time embedding
+
+        
         emb = self.time_embed(timestep_embedding(timesteps, self.model_channels))
-        
-        # 打印特征信息（如果有）
-        #if control_features is not None:
-        #    print(f"  使用ControlNet特征注入，特征层级: {list(control_features.keys())}")
-        #if encoder_hidden_states is not None:
-            #print(f"  使用CLIP文本特征注入，形状: {encoder_hidden_states.shape}")
-        
-        # Scene Token、ControlNet特征和CLIP文本特征都通过中层注入
 
         
         x = self.upsample(ms)
         skip_c0 = x
         
-        #  在cat之前打印形状
+        # 🔥 在cat之前打印形状
         if not hasattr(self, '_debug_cat_printed'):
             self._debug_cat_printed = True
             print(f"\n[Step 4] 准备 cat 操作:")
@@ -577,10 +382,10 @@ class SSNet(PatchMergeModule):
             print(f"  x_t.shape (before cat) = {x_t.shape}")
             print(f"  尝试执行: torch.cat([pan, x_t], dim=1)")
         
-        pan = torch.cat([pan, x_t], dim=1)  # 9 64 64 (1 + 8 = 9)
+        pan = torch.cat([pan, x_t], dim=1)  # 9 64 64
         pan = self.conv_pan2x_t(pan)    # 32 64 64
         
-        lms = torch.cat([lms, x_t], dim=1)  # 16 64 64 (8 + 8 = 16)
+        lms = torch.cat([lms, x_t], dim=1)  # 16 64 64
         lms = self.conv_lms2x_t(lms)    # 32 64 64
         
         y = self.time_emb_pan(pan, emb)   # 32 64 64
@@ -602,9 +407,7 @@ class SSNet(PatchMergeModule):
         skip_c10 = x  # 32 64 64
         x = self.down0(x)  # 64 32 32
         
-        # 获取对应层级的ControlNet特征（如果有）
-        control_feature_level0 = control_features.get('level_0') if control_features else None
-        y = self.resblock0(y, emb, epoch=self.current_epoch, scene_token=scene_token, control_feature=control_feature_level0, encoder_hidden_states=None)  # 32 64 64
+        y = self.resblock0(y, emb, epoch=self.current_epoch)  # 32 64 64
         skip_c11 = y  # 32 64 64
         y = self.down0(y)  # 64 32 32
 
@@ -617,9 +420,7 @@ class SSNet(PatchMergeModule):
         x = self.down1(x)  # 128 16 16
         
         
-        # 获取对应层级的ControlNet特征（如果有）
-        control_feature_level1 = control_features.get('level_1') if control_features else None
-        y = self.resblock1(y, emb, epoch=self.current_epoch, scene_token=scene_token, control_feature=control_feature_level1, encoder_hidden_states=encoder_hidden_states)  # 64 32 32
+        y = self.resblock1(y, emb,epoch=self.current_epoch)  # 64 32 32
         skip_c21 = y  # 64 32 32
         y = self.down1(y)  # 128 16 16
 
@@ -629,9 +430,7 @@ class SSNet(PatchMergeModule):
         x = self.fusformer2(x, y2)  # 128 16 16
         x = self.up0(x, skip_c20)  # 64 32 32
         
-        # 获取对应层级的ControlNet特征（如果有）
-        control_feature_level2 = control_features.get('level_2') if control_features else None
-        y = self.resblock2(y, emb, epoch=self.current_epoch, scene_token=scene_token, control_feature=control_feature_level2, encoder_hidden_states=encoder_hidden_states)  # 128 16 16
+        y = self.resblock2(y, emb,epoch=self.current_epoch)  # 128 16 16
         y = self.up0(y, skip_c21)  # 64 32 32
 
         # layer 3
@@ -640,9 +439,7 @@ class SSNet(PatchMergeModule):
         x = self.fusformer3(x, y3)  # 64 32 32
         x = self.up1(x, skip_c10)  # 32 64 64
         
-        # 获取对应层级的ControlNet特征（如果有）
-        control_feature_level3 = control_features.get('level_3') if control_features else None
-        y = self.resblock3(y, emb, epoch=self.current_epoch, scene_token=scene_token, control_feature=control_feature_level3, encoder_hidden_states=None)  # 64 32 32
+        y = self.resblock3(y, emb,epoch=self.current_epoch)  # 64 32 32
         y = self.up1(y, skip_c11)  # 32 64 64
 
         # layer 4
@@ -670,17 +467,9 @@ class SSNet(PatchMergeModule):
         num_batch = args[0].shape[0]
         lms = args[0]  # 获取lms patch
         
-        lms = args[0]  # 获取lms patch
-        
         if noise is not None:
             img = noise
         else:
-            # 默认从随机噪声开始，但对于单步蒸馏，应该从lms开始
-            # 如果num_timesteps=1，从lms开始（用于蒸馏）
-            if kwargs.get('num_timesteps', 1000) == 1:
-                img = lms.clone()  # 从lms patch开始（与训练一致）
-            else:
-                img = torch.randn(*shape, device=device)  # 随机噪声
             # 默认从随机噪声开始，但对于单步蒸馏，应该从lms开始
             # 如果num_timesteps=1，从lms开始（用于蒸馏）
             if kwargs.get('num_timesteps', 1000) == 1:
@@ -698,8 +487,6 @@ class SSNet(PatchMergeModule):
             self.indices = tqdm(self.indices)
         
         # lms已经在前面定义了，不需要再定义
-        
-        # lms已经在前面定义了，不需要再定义
         for i in self.indices:
             t = torch.tensor([i] * shape[0], device=device)
             t = t[:num_batch, ...]          
@@ -712,7 +499,7 @@ class SSNet(PatchMergeModule):
 
         return img.contiguous()
     
-    def forward_chop_distill(self, lms, pan, ms, xt, sample_fn, patch_size=64, batch_size=8, scene_token=None, control_features=None, controlnet=None, encoder_hidden_states=None, **kwargs):
+    def forward_chop_distill(self, lms, pan, ms, xt, sample_fn, patch_size=64, batch_size=8, **kwargs):
         """
         专门用于单步蒸馏的 forward_chop 实现，支持大图像的 patch 切分
         
@@ -724,17 +511,11 @@ class SSNet(PatchMergeModule):
             sample_fn: 回调函数
             patch_size: patch 大小（默认64）
             batch_size: 每次处理的 patch 数量（默认8）
-            scene_token: 场景token [B, 256]（可选）
-            control_features: ControlNet特征字典（可选，已弃用）
-            controlnet: ControlNet模型对象（可选，推荐）- 逐patch计算以节省显存
-            encoder_hidden_states: CLIP文本嵌入 [B, seq_len, 768] (可选)
         """
         import torch.nn.functional as F
         
         print(f"\n[DEBUG] 进入 SSNet.forward_chop_distill")
         print(f"  输入形状: lms={lms.shape}, pan={pan.shape}, ms={ms.shape}, xt={xt.shape}")
-        if scene_token is not None:
-            print(f"  scene_token形状: {scene_token.shape}")
         
         B, C_lms, H, W = lms.shape
         device = lms.device
@@ -743,7 +524,7 @@ class SSNet(PatchMergeModule):
         if H <= patch_size and W <= patch_size:
             print(f"  小图像，直接处理")
             timesteps = torch.full((B,), 999, device=device, dtype=torch.long)
-            model_output = self.forward_impl(lms, pan, ms, x_t=xt, timesteps=timesteps, scene_token=scene_token, control_features=control_features, encoder_hidden_states=encoder_hidden_states)
+            model_output = self.forward_impl(lms, pan, ms, x_t=xt, timesteps=timesteps)
             # 更新 kwargs 中的 noise
             kwargs_copy = kwargs.copy()
             kwargs_copy['noise'] = xt
@@ -766,7 +547,7 @@ class SSNet(PatchMergeModule):
         H_pad, W_pad = lms_pad.shape[2:]
         print(f"  Padding后: {H_pad}x{W_pad}")
         
-        # 关键修复：ms 也需要切分！
+        # 🔥 关键修复：ms 也需要切分！
         # ms 的尺寸是 lms 的 1/4，所以 patch_size 也要除以 4
         ms_patch_size = patch_size // 4
         ms_stride = stride // 4
@@ -803,30 +584,13 @@ class SSNet(PatchMergeModule):
             lms_batch = lms_patches[i:end_idx]
             pan_batch = pan_patches[i:end_idx]
             xt_batch = xt_patches[i:end_idx]
-            ms_batch = ms_patches[i:end_idx]  #  使用对应的 ms patch
+            ms_batch = ms_patches[i:end_idx]  # 🔥 使用对应的 ms patch
             
             # 调整 timesteps 大小
             ts_batch = timesteps[:curr_batch]
             
-            #  Scene token对于所有patches都是相同的（从整张图提取）
-            # 需要复制scene_token以匹配当前batch大小
-            scene_token_batch = None
-            if scene_token is not None:
-                # scene_token是[B, 256]，这里B通常是1（单张图）
-                # 需要expand到当前patch batch大小
-                scene_token_batch = scene_token.expand(curr_batch, -1)
-            
-            #  ControlNet特征：逐patch计算（节省显存）
-            control_features_batch = None
-            if controlnet is not None:
-                # 逐patch计算ControlNet特征，避免对整图计算导致OOM
-                control_features_batch = controlnet(pan_batch, xt_batch, ts_batch)
-            elif control_features is not None:
-                # 向后兼容：如果传入了预计算的control_features，使用它
-                control_features_batch = control_features
-            
-            # 调用 forward_impl，传入对应的 ms patch、scene_token、control_features 和 encoder_hidden_states
-            model_output = self.forward_impl(lms_batch, pan_batch, ms_batch, x_t=xt_batch, timesteps=ts_batch, scene_token=scene_token_batch, control_features=control_features_batch, encoder_hidden_states=encoder_hidden_states)
+            # 调用 forward_impl，传入对应的 ms patch
+            model_output = self.forward_impl(lms_batch, pan_batch, ms_batch, x_t=xt_batch, timesteps=ts_batch)
             
             # 调用回调（注意：不要重复传 noise，已经在 kwargs 中了）
             # 临时更新 kwargs 中的 noise 为当前 batch 的 xt
@@ -907,5 +671,3 @@ if __name__ == "__main__":
     for _ in range(2000):
         sr = model.forward(lms, pan, ms, x_t, t)
     print(time.time() - tic)
-
-

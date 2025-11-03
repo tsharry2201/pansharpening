@@ -4,21 +4,22 @@
 
 # ============ 配置参数 ============
 # 蒸馏后的模型checkpoint (使用最新的checkpoint)
-DISTILLED_MODEL="./experiments/ssdiff_distill_20251018_221733/checkpoints/model_10000.pkl"
+DISTILLED_MODEL="./experiments/ssdiff_distill_20251103_010245/checkpoints/model_12000.pkl"
 # 232238是改进后的蒸馏模型，但出现loss一直没降下来  第二次修改版是165605  第三次修改了加噪模式，但未使用 microbarch 221733
+#1103_010245是SSDiff+ARConv蒸馏
 # 原始预训练SSDiff（用于加载基础权重）
-PRETRAINED_SSDIFF="/home/zelilin/data/pansharpening/SSDiff_main/results/10-15-22-29/model065000.pt"
+PRETRAINED_SSDIFF="/home/zelilin/data/pansharpening/SSDiff_main/results/10-18-13-11/model120000.pt"
 
 # 测试配置
 TEST_DATASET="test_wv3_multiExm1.h5"  # 或 test_wv3_OrigScale_multiExm1.h5
 NUM_IMAGES=20
-DEVICE="cuda:6"
+DEVICE="cuda:1"
 OUTPUT_DIR="test_results/distilled"
 
 # 🔥 实验配置：是否使用带噪声的 x_t（更接近训练分布）
 # True: 使用 q_sample_xt(0, t=999, noise) 生成带噪声的 x_t
 # False (或留空): 使用 x_t=0（稳定、可复现）
-USE_NOISE="True"  # 改为 "True" 来测试带噪版本
+USE_NOISE="False"  # 改为 "True" 来测试带噪版本
 
 # ============ 开始测试 ============
 echo "========================================"
@@ -31,7 +32,7 @@ echo "🔬 Use Noise x_t: $USE_NOISE"
 echo "========================================"
 
 # 构建命令
-CMD="python test_ssdiff_unified.py \
+CMD="python test_ssdiff_distilled.py \
     --model_path \"$DISTILLED_MODEL\" \
     --pretrained_ssdiff_path \"$PRETRAINED_SSDIFF\" \
     --use_distillation True \
@@ -57,4 +58,3 @@ eval $CMD
 echo "========================================"
 echo "✅ Testing completed!"
 echo "========================================"
-
