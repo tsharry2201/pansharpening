@@ -27,13 +27,14 @@ class parser_args(TaskDispatcher, name='DPM_ps'):
 
         # 继续训练时，设置checkpoint路径
         # 例如：ckpt_model_path = "/home/zelilin/data/pansharpening/SSDiff_main/results/10-17-03-13/model065000.pt"
-        ckpt_model_path = "/home/zelilin/data/pansharpening/SSDiff_main/results/10-17-12-19/model120000.pt"
+        ckpt_model_path = "/home/zelilin/data/pansharpening/SSDiff_main/results/11-04-21-29/model052000.pt"
         
         # 修改为您的模型路径
         # EMA模型（推荐）：results/MM-DD-HH-MM/ema_0.9999_XXXXXX.pt
         # 或主模型：results/MM-DD-HH-MM/modelXXXXXX.pt
-        test_model_path = "/home/zelilin/data/pansharpening/SSDiff_main/results/10-17-16-00/model230000.pt"
+        test_model_path = "/home/zelilin/data/pansharpening/SSDiff_main/results/11-04-21-21/model120000.pt"
         #10-14-22-28代表是+ARConv的    10-15-17-45是没有ARConv的  10-15-22-29是调整ARConv中fix为1e4的 10-17-03-13是fix为1e3的  10-17-12-19是fix为5e3的 1600是继续训0313的
+        #11042121 是新版在OTPNet下进行的，fix 为5e3  2129fix为2e3
         parser = argparse.ArgumentParser(description='PyTorch Training')
         # * Logger
         parser.add_argument('--out_dir', metavar='DIR', default=f'{root_dir}/results/{cfg.task}',
@@ -60,12 +61,14 @@ class parser_args(TaskDispatcher, name='DPM_ps'):
         # * Model and Dataset
         parser.add_argument('--arch', '-a', metavar='ARCH', default='iDPM', type=str,
                             choices=['PanNet', 'DiCNN', 'PNN', 'FusionNet'])
-        parser.add_argument('--dataset', default={'train': 'wv3', 'val': 'wv3', 'test': 'test_wv3_multiExm1.h5'}, type=str,
-                            choices=[None, 'wv2', 'wv3', 'wv4', 'qb', 'gf2',
-                                     'wv3_OrigScale_multiExm1.h5', 'wv3_multiExm1.h5'],
-                            help="performing evalution for patch2entire")
+    # 使用本地 WV3 的 otpnet 版本作为默认 dataset（train/valid/test）
+    # 注意：本 repo dataset 目录下存在文件 train_wv3_otpnet.h5 / valid_wv3_otpnet.h5
+        parser.add_argument('--dataset', default={'train': 'wv3_otpnet', 'valid': 'wv3_otpnet', 'test': 'test_wv3_multiExm1.h5'},
+                choices=[None, 'wv2', 'wv3', 'wv3_otpnet', 'wv4', 'qb', 'gf2',
+                     'wv3_OrigScale_multiExm1.h5', 'wv3_multiExm1.h5'],
+                help="performing evalution for patch2entire")
         parser.add_argument('--eval', default=False, type=bool,
-                            help="performing evalution for patch2entire")
+            help="performing evalution for patch2entire")
 
         parser.add_argument('--dim', default=32, type=int)
         parser.add_argument('--dim_head', default=16, type=int)

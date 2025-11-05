@@ -37,7 +37,7 @@ def set_seed(seed):
     
 
 def main(
-    device='cuda:0',
+    device='cuda:1',
     Resume = False,
     resume_epoch = 0  # 继续训练时设置正确的epoch值
     ):
@@ -121,7 +121,7 @@ if __name__ == "__main__":
     # 2. 设置 resume_epoch > 5000 以保护ARConv的reserved_NXY不被覆盖
     # 3. 建议降低学习率 (lr=1e-4 或 1e-5)
     # 示例：
-    main(device='cuda:2', Resume=True, resume_epoch=120000)
+    main(device='cuda:1', Resume=True, resume_epoch=52000)
     
     # ============ 正常训练模式 ============
     #main()

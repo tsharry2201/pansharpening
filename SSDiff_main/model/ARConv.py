@@ -111,7 +111,7 @@ class ARConv(nn.Module):
         l = self.l_conv(offset) * (hw_range[1] - 1) + 1  # b, 1, h, w
         w = self.w_conv(offset) * (hw_range[1] - 1) + 1  # b, 1, h, w
         # 对于SSDiff，使用自适应的固定epoch值（从__init__计算得到）
-        fix_epoch = 5000  ## 原来是10000 后改为1000
+        fix_epoch = 2000  ## 原来是5000 后改为2000
         if epoch <= fix_epoch:
             mean_l = l.mean(dim=0).mean(dim=1).mean(dim=1)
             mean_w = w.mean(dim=0).mean(dim=1).mean(dim=1)
