@@ -28,6 +28,118 @@ from utils.script_util import (
 from improved_diffusion import logger
 
 
+def get_self_ensemble_transforms():
+    """
+    获取8种self-ensemble变换及其逆变换
+    
+    Returns:
+        transforms: list of (transform_fn, inverse_transform_fn, name)
+    """
+    transforms = []
+    
+    # 1. 原图
+    transforms.append((
+        lambda x: x,
+        lambda x: x,
+        "original"
+    ))
+    
+    # 2. 水平翻转 (H-flip)
+    transforms.append((
+        lambda x: torch.flip(x, dims=[-1]),  # flip width
+        lambda x: torch.flip(x, dims=[-1]),
+        "h_flip"
+    ))
+    
+    # 3. 垂直翻转 (V-flip)
+    transforms.append((
+        lambda x: torch.flip(x, dims=[-2]),  # flip height
+        lambda x: torch.flip(x, dims=[-2]),
+        "v_flip"
+    ))
+    '''
+    # 4. 旋转90度
+    transforms.append((
+        lambda x: torch.rot90(x, k=1, dims=[-2, -1]),
+        lambda x: torch.rot90(x, k=-1, dims=[-2, -1]),  # 逆时针90度
+        "rot90"
+    ))
+    
+    # 5. 旋转180度
+    transforms.append((
+        lambda x: torch.rot90(x, k=2, dims=[-2, -1]),
+        lambda x: torch.rot90(x, k=2, dims=[-2, -1]),  # 旋转180度的逆变换还是180度
+        "rot180"
+    ))
+    
+    # 6. 旋转270度
+    transforms.append((
+        lambda x: torch.rot90(x, k=3, dims=[-2, -1]),
+        lambda x: torch.rot90(x, k=-3, dims=[-2, -1]),  # 等价于rot90
+        "rot270"
+    ))
+    
+    # 7. 水平翻转 + 旋转90度
+    transforms.append((
+        lambda x: torch.rot90(torch.flip(x, dims=[-1]), k=1, dims=[-2, -1]),
+        lambda x: torch.flip(torch.rot90(x, k=-1, dims=[-2, -1]), dims=[-1]),
+        "h_flip_rot90"
+    ))
+    
+    # 8. 垂直翻转 + 旋转90度
+    transforms.append((
+        lambda x: torch.rot90(torch.flip(x, dims=[-2]), k=1, dims=[-2, -1]),
+        lambda x: torch.flip(torch.rot90(x, k=-1, dims=[-2, -1]), dims=[-2]),
+        "v_flip_rot90"
+    ))
+    '''
+    return transforms
+
+
+def apply_self_ensemble(model_fn, lms, pan, ms, verbose=False):
+    """
+    应用self-ensemble进行推理
+    
+    Args:
+        model_fn: 模型推理函数，输入(lms, pan, ms)，输出预测结果
+        lms, pan, ms: 输入数据
+        verbose: 是否打印详细信息
+    
+    Returns:
+        ensemble_output: 平均后的预测结果
+    """
+    transforms = get_self_ensemble_transforms()
+    ensemble_outputs = []
+    
+    if verbose:
+        print(f"\n🔄 Applying self-ensemble with {len(transforms)} transforms...")
+    
+    for i, (transform_fn, inverse_fn, name) in enumerate(transforms):
+        # 1. 对输入应用变换
+        lms_t = transform_fn(lms)
+        pan_t = transform_fn(pan)
+        ms_t = transform_fn(ms)
+        
+        # 2. 模型推理
+        with torch.no_grad():
+            output_t = model_fn(lms_t, pan_t, ms_t)
+        
+        # 3. 对输出应用逆变换
+        output_inv = inverse_fn(output_t)
+        ensemble_outputs.append(output_inv)
+        
+        if verbose and i == 0:
+            print(f"   Transform '{name}': output range [{output_inv.min():.4f}, {output_inv.max():.4f}]")
+    
+    # 4. 平均所有变换的结果
+    ensemble_output = torch.stack(ensemble_outputs, dim=0).mean(dim=0)
+    
+    if verbose:
+        print(f"   ✅ Ensemble output range: [{ensemble_output.min():.4f}, {ensemble_output.max():.4f}]")
+    
+    return ensemble_output
+
+
 def parse_args():
     """解析命令行参数"""
     parser = argparse.ArgumentParser(description='Unified SSDiff Testing')
@@ -43,6 +155,8 @@ def parse_args():
                        help="是否使用蒸馏模型（True=单步，False=多步）")
     parser.add_argument("--test_with_noise", type=bool, default=False,
                        help="是否使用带噪声的x_t（仅蒸馏模式有效）")
+    parser.add_argument("--use_self_ensemble", action='store_true',
+                       help="是否使用self-ensemble（8种几何变换集成）")
     
     # 测试参数
     parser.add_argument("--device", type=str, default='cuda:0')
@@ -70,6 +184,8 @@ def test_original_ssdiff(args, ssdiff_args):
     print("🔵 Testing Original SSDiff (Multi-step Sampling)")
     print(f"   Model: {args.model_path}")
     print(f"   Sampling: {args.timestep_respacing}")
+    if args.use_self_ensemble:
+        print(f"   🔄 Self-Ensemble: Enabled (8 transforms)")
     print("=" * 60)
     
     # 创建模型
@@ -117,17 +233,33 @@ def test_original_ssdiff(args, ssdiff_args):
             else diffusion.ddim_sample_loop
         )
         
-        kwargs_data = {"lms": lms, "pan": pan, "ms": ms}
-        
-        with torch.no_grad():
-            sample = sample_fn(
-                model,
-                shape=(ssdiff_args.crop_batch_size, ssdiff_args.ms_dim, 
-                      ssdiff_args.image_size, ssdiff_args.image_size),
-                model_kwargs=kwargs_data,
-                clip_denoised=ssdiff_args.clip_denoised,
-                progress=False
-            )
+        if args.use_self_ensemble:
+            # 使用self-ensemble
+            def model_fn(lms_in, pan_in, ms_in):
+                kwargs_data = {"lms": lms_in, "pan": pan_in, "ms": ms_in}
+                return sample_fn(
+                    model,
+                    shape=(ssdiff_args.crop_batch_size, ssdiff_args.ms_dim, 
+                          ssdiff_args.image_size, ssdiff_args.image_size),
+                    model_kwargs=kwargs_data,
+                    clip_denoised=ssdiff_args.clip_denoised,
+                    progress=False
+                )
+            
+            sample = apply_self_ensemble(model_fn, lms, pan, ms, verbose=(i == 0))
+        else:
+            # 原始单次推理
+            kwargs_data = {"lms": lms, "pan": pan, "ms": ms}
+            
+            with torch.no_grad():
+                sample = sample_fn(
+                    model,
+                    shape=(ssdiff_args.crop_batch_size, ssdiff_args.ms_dim, 
+                          ssdiff_args.image_size, ssdiff_args.image_size),
+                    model_kwargs=kwargs_data,
+                    clip_denoised=ssdiff_args.clip_denoised,
+                    progress=False
+                )
         
         sample = sample.contiguous()
         sample = (sample * 2047.).clamp(0, 2047)
@@ -137,8 +269,8 @@ def test_original_ssdiff(args, ssdiff_args):
             print(f"Processed {i+1}/{image_num} images")
     
     inference_time = time.time() - tic
-    print(f"\n⏱️  Total time: {inference_time:.2f}s")
-    print(f"⏱️  Average time per image: {inference_time/image_num:.3f}s")
+    print(f"\n  Total time: {inference_time:.2f}s")
+    print(f"  Average time per image: {inference_time/image_num:.3f}s")
     
     return all_images, data4gt, inference_time
 
@@ -148,13 +280,15 @@ def test_distilled_ssdiff(args, ssdiff_args):
     测试蒸馏后的SSDiff（单步采样）
     """
     print("=" * 60)
-    print("🟢 Testing Distilled SSDiff (One-step Sampling)")
+    print(" Testing Distilled SSDiff (One-step Sampling)")
     print(f"   Model: {args.model_path}")
     print(f"   Base: {args.pretrained_ssdiff_path}")
     if hasattr(ssdiff_args, 'test_with_noise') and ssdiff_args.test_with_noise:
-        print(f"   🔬 x_t mode: Noisy (q_sample_xt)")
+        print(f"    x_t mode: Noisy (q_sample_xt)")
     else:
-        print(f"   ✓ x_t mode: Zero tensor (stable)")
+        print(f"    x_t mode: Zero tensor (stable)")
+    if args.use_self_ensemble:
+        print(f"    Self-Ensemble: Enabled (8 transforms)")
     print("=" * 60)
     
     # 创建蒸馏模型
@@ -183,13 +317,12 @@ def test_distilled_ssdiff(args, ssdiff_args):
         gt = einops.rearrange(gt, 'b k1 k2 c -> b c k1 k2')
         data4gt.append(gt[0])       
         
-        # ⚠️ 数据加载器已经归一化到[0,1]了（用img_scale=2047.0），不需要再次归一化！
         # 第一张图像：检查数据范围
         if i == 0:
             print("\n" + "="*60)
-            print("🔍 DEBUG INFO - First Image (数据已被加载器归一化)")
+            print(" DEBUG INFO - First Image (数据已被加载器归一化)")
             print("="*60)
-            print(f"📥 Input ranges (already normalized to [0,1] by dataloader):")
+            print(f" Input ranges (already normalized to [0,1] by dataloader):")
             print(f"   LMS: [{lms.min():.4f}, {lms.max():.4f}], mean={lms.mean():.4f}, std={lms.std():.4f}")
             print(f"   PAN: [{pan.min():.4f}, {pan.max():.4f}], mean={pan.mean():.4f}, std={pan.std():.4f}")
             print(f"   MS:  [{ms.min():.4f}, {ms.max():.4f}], mean={ms.mean():.4f}, std={ms.std():.4f}")
@@ -199,12 +332,20 @@ def test_distilled_ssdiff(args, ssdiff_args):
             print(f"   GT:  [{gt_normalized.min():.4f}, {gt_normalized.max():.4f}], mean={gt_normalized.mean():.4f}, std={gt_normalized.std():.4f}")
       
         # 单步推理
-        with torch.no_grad():
-            sample = test_model(lms, pan, ms)
+        if args.use_self_ensemble:
+            # 使用self-ensemble
+            def model_fn(lms_in, pan_in, ms_in):
+                return test_model(lms_in, pan_in, ms_in)
+            
+            sample = apply_self_ensemble(model_fn, lms, pan, ms, verbose=(i == 0))
+        else:
+            # 原始单次推理
+            with torch.no_grad():
+                sample = test_model(lms, pan, ms)
         
         # 第一张图像时打印输出信息
         if i == 0:
-            print(f"\n📤 Model output ([0,1] range):")
+            print(f"\n Model output ([0,1] range):")
             print(f"   Output: [{sample.min():.4f}, {sample.max():.4f}], mean={sample.mean():.4f}, std={sample.std():.4f}")
             
             # 计算与GT的差异
@@ -220,7 +361,7 @@ def test_distilled_ssdiff(args, ssdiff_args):
             # 残差预测误差
             residual_error = predicted_residual - actual_residual
             
-            print(f"\n📊 残差分析 (Residual Analysis):")
+            print(f"\n 残差分析 (Residual Analysis):")
             print(f"   预测残差 (Predicted): [{predicted_residual.min():.4f}, {predicted_residual.max():.4f}], mean={predicted_residual.mean():.4f}, std={predicted_residual.std():.4f}")
             print(f"   实际残差 (Actual):    [{actual_residual.min():.4f}, {actual_residual.max():.4f}], mean={actual_residual.mean():.4f}, std={actual_residual.std():.4f}")
             print(f"   残差误差 (Error):     [{residual_error.min():.4f}, {residual_error.max():.4f}], mean={residual_error.mean():.4f}, std={residual_error.std():.4f}")
@@ -228,7 +369,7 @@ def test_distilled_ssdiff(args, ssdiff_args):
             
             # 计算与GT的差异
             output_diff = torch.abs(sample_cpu - gt_tensor)
-            print(f"\n📊 输出与GT差异:")
+            print(f"\n 输出与GT差异:")
             print(f"   Abs diff: [{output_diff.min():.4f}, {output_diff.max():.4f}], mean={output_diff.mean():.4f}")
             print(f"   MSE: {(output_diff**2).mean():.6f}")
         
@@ -237,7 +378,7 @@ def test_distilled_ssdiff(args, ssdiff_args):
         all_images.extend([sample.cpu().numpy()])
         
         if i == 0:
-            print(f"\n📤 Final output (denormalized to [0,2047] for metrics):")
+            print(f"\n Final output (denormalized to [0,2047] for metrics):")
             print(f"   Output: [{sample.min():.4f}, {sample.max():.4f}], mean={sample.mean():.4f}")
             print("="*60)
         
@@ -245,8 +386,8 @@ def test_distilled_ssdiff(args, ssdiff_args):
             print(f"Processed {i+1}/{image_num} images")
     
     inference_time = time.time() - tic
-    print(f"\n⏱️  Total time: {inference_time:.2f}s")
-    print(f"⏱️  Average time per image: {inference_time/image_num:.3f}s")
+    print(f"\n Total time: {inference_time:.2f}s")
+    print(f"  Average time per image: {inference_time/image_num:.3f}s")
     
     return all_images, data4gt, inference_time
 
@@ -288,6 +429,10 @@ def main():
         all_images, data4gt, inference_time = test_original_ssdiff(args, ssdiff_args)
         mode_name = f"original_{args.timestep_respacing}"
     
+    # 如果使用self-ensemble，在模式名称中标记
+    if args.use_self_ensemble:
+        mode_name = f"{mode_name}_ensemble"
+    
     # 保存结果
     arr = np.concatenate(all_images, axis=0)
     
@@ -328,13 +473,13 @@ def main():
     
     # 打印总结
     print("\n" + "=" * 60)
-    print("✅ Testing Complete!")
+    print(" Testing Complete!")
     print("=" * 60)
-    print(f"📁 Results saved to: {out_path}")
-    print(f"🖼️  Images processed: {len(arr)}")
-    print(f"⏱️  Total time: {inference_time:.2f}s")
-    print(f"⏱️  Avg time/image: {inference_time/len(arr):.3f}s")
-    print(f"🚀 Speed: {len(arr)/inference_time:.2f} images/sec")
+    print(f" Results saved to: {out_path}")
+    print(f"  Images processed: {len(arr)}")
+    print(f" Total time: {inference_time:.2f}s")
+    print(f" Avg time/image: {inference_time/len(arr):.3f}s")
+    print(f" Speed: {len(arr)/inference_time:.2f} images/sec")
     print("=" * 60)
 
 

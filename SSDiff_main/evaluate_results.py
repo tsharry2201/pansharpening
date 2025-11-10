@@ -309,6 +309,7 @@ def sam(img1, img2):
     """
     SAM (Spectral Angle Mapper) for 3D image, shape (H, W, C)
     Lower is better (0 is best)
+    Returns angle in degrees
     """
     if not img1.shape == img2.shape:
         raise ValueError('Input images must have the same dimensions.')
@@ -322,7 +323,8 @@ def sam(img1, img2):
     
     # numerical stability
     cos_theta = (inner_product / (img1_spectral_norm * img2_spectral_norm + np.finfo(np.float64).eps)).clip(min=0, max=1)
-    return np.mean(np.arccos(cos_theta))
+    # Convert from radians to degrees
+    return np.mean(np.degrees(np.arccos(cos_theta)))
 
 
 def psnr(img1, img2, dynamic_range=2047):

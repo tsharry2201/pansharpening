@@ -372,15 +372,8 @@ class SSNet(PatchMergeModule):
 
         
         x = self.upsample(ms)
-        skip_c0 = x
+        skip_c0 = x #### 改为lms 在测原来的时候还是要用x
         
-        # 🔥 在cat之前打印形状
-        if not hasattr(self, '_debug_cat_printed'):
-            self._debug_cat_printed = True
-            print(f"\n[Step 4] 准备 cat 操作:")
-            print(f"  pan.shape (before cat) = {pan.shape}")
-            print(f"  x_t.shape (before cat) = {x_t.shape}")
-            print(f"  尝试执行: torch.cat([pan, x_t], dim=1)")
         
         pan = torch.cat([pan, x_t], dim=1)  # 9 64 64
         pan = self.conv_pan2x_t(pan)    # 32 64 64
@@ -449,8 +442,7 @@ class SSNet(PatchMergeModule):
 
 
         output = self.to_hrms(x) + skip_c0  # 8 64 64
-
-        
+        #output = skip_c0
         return output
     def set_epoch(self, epoch):
         """供训练循环调用来更新当前epoch"""
@@ -514,15 +506,12 @@ class SSNet(PatchMergeModule):
         """
         import torch.nn.functional as F
         
-        print(f"\n[DEBUG] 进入 SSNet.forward_chop_distill")
-        print(f"  输入形状: lms={lms.shape}, pan={pan.shape}, ms={ms.shape}, xt={xt.shape}")
         
         B, C_lms, H, W = lms.shape
         device = lms.device
         
         # 如果图像小于等于 patch_size，直接处理
         if H <= patch_size and W <= patch_size:
-            print(f"  小图像，直接处理")
             timesteps = torch.full((B,), 999, device=device, dtype=torch.long)
             model_output = self.forward_impl(lms, pan, ms, x_t=xt, timesteps=timesteps)
             # 更新 kwargs 中的 noise
@@ -531,8 +520,6 @@ class SSNet(PatchMergeModule):
             result = sample_fn(model_output, timesteps, lms, **kwargs_copy)
             return result['sample']
         
-        # 大图像：进行 patch 切分
-        print(f"  大图像 ({H}x{W})，进行 patch 切分（patch_size={patch_size}）")
         
         # 计算 padding
         stride = patch_size // 2
@@ -545,9 +532,8 @@ class SSNet(PatchMergeModule):
         xt_pad = F.pad(xt, (0, pad_w, 0, pad_h), mode='reflect')
         
         H_pad, W_pad = lms_pad.shape[2:]
-        print(f"  Padding后: {H_pad}x{W_pad}")
         
-        # 🔥 关键修复：ms 也需要切分！
+        # 关键修复：ms 也需要切分！
         # ms 的尺寸是 lms 的 1/4，所以 patch_size 也要除以 4
         ms_patch_size = patch_size // 4
         ms_stride = stride // 4
@@ -584,7 +570,7 @@ class SSNet(PatchMergeModule):
             lms_batch = lms_patches[i:end_idx]
             pan_batch = pan_patches[i:end_idx]
             xt_batch = xt_patches[i:end_idx]
-            ms_batch = ms_patches[i:end_idx]  # 🔥 使用对应的 ms patch
+            ms_batch = ms_patches[i:end_idx]  #  使用对应的 ms patch
             
             # 调整 timesteps 大小
             ts_batch = timesteps[:curr_batch]
@@ -617,7 +603,6 @@ class SSNet(PatchMergeModule):
         # 裁剪回原始尺寸
         output = output[:, :, :H, :W]
         
-        print(f"  输出形状: {output.shape}")
         return output
 
     

@@ -38,7 +38,7 @@ def initialize_ssdiff_unet_with_lora(args, pretrained_path=None):
         print(f"Loading pretrained SSDiff from: {pretrained_path}")
         state_dict = torch.load(pretrained_path, map_location='cpu')
         model.load_state_dict(state_dict)
-        print("✅ Pretrained SSDiff loaded successfully!")
+        print(" Pretrained SSDiff loaded successfully!")
     
     # 冻结所有参数
     model.requires_grad_(False)
@@ -449,7 +449,7 @@ class SSDiff_reg(nn.Module):
         # 随机采样中间时间步
         timesteps = torch.randint(20, 980, (bsz,), device=device).long()
         
-        # 🔥 核心修改：对残差添加噪声（与原SSDiff一致）
+        #  核心修改：对残差添加噪声（与原SSDiff一致）
         x_pred_residual = x_pred - lms  # 预测的残差
         noise = torch.randn_like(x_pred_residual)
         # 使用diffusion的q_sample_xt对残差添加噪声
@@ -504,6 +504,7 @@ class SSDiff_test(nn.Module):
         super().__init__()
         self.args = args
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self._first_forward = True  # 标志：是否是第一次forward
         
         # 对于蒸馏模式，不使用SpacedDiffusion，直接使用完整的1000步空间
         if args.use_distillation:
@@ -534,18 +535,18 @@ class SSDiff_test(nn.Module):
                 if hasattr(args, 'pretrained_ssdiff_path'):
                     base_state = torch.load(args.pretrained_ssdiff_path, map_location='cpu')
                     self.model.load_state_dict(base_state)
-                    print("✅ Loaded base SSDiff weights")
+                    print("Loaded base SSDiff weights")
                 
                 # 添加LoRA层
                 if 'lora_target_modules' in state_dict:
                     # 从checkpoint中读取lora_rank
                     if 'lora_rank' in state_dict:
                         args.lora_rank = state_dict['lora_rank']
-                        print(f"📊 Using lora_rank={args.lora_rank} from checkpoint")
+                        print(f" Using lora_rank={args.lora_rank} from checkpoint")
                     else:
                         # 默认值
                         args.lora_rank = 4
-                        print(f"⚠️  lora_rank not found in checkpoint, using default: {args.lora_rank}")
+                        print(f"  lora_rank not found in checkpoint, using default: {args.lora_rank}")
                     
                     # 添加LoRA层并加载权重（在基础SSDiff权重之上）
                     self.model, _ = initialize_ssdiff_unet_with_lora(
@@ -641,36 +642,41 @@ class SSDiff_test(nn.Module):
                 # 最终输出 = lms_patch + 残差
                 output = lms_input + pred_xstart
                 
-                # 打印统计信息
-                print(f"   LMS patch: [{lms_input.min():.4f}, {lms_input.max():.4f}], mean={lms_input.mean():.4f}")
-                print(f"   Model output (residual): [{model_output.min():.4f}, {model_output.max():.4f}], mean={model_output.mean():.4f}")
-                print(f"   Predicted residual: [{pred_xstart.min():.4f}, {pred_xstart.max():.4f}], mean={pred_xstart.mean():.4f}")
-                print(f"   Output before clamp: [{output.min():.4f}, {output.max():.4f}], mean={output.mean():.4f}")
+                # 注释掉统计信息打印，避免每个patch都输出
+                # print(f"   LMS patch: [{lms_input.min():.4f}, {lms_input.max():.4f}], mean={lms_input.mean():.4f}")
+                # print(f"   Model output (residual): [{model_output.min():.4f}, {model_output.max():.4f}], mean={model_output.mean():.4f}")
+                # print(f"   Predicted residual: [{pred_xstart.min():.4f}, {pred_xstart.max():.4f}], mean={pred_xstart.mean():.4f}")
+                # print(f"   Output before clamp: [{output.min():.4f}, {output.max():.4f}], mean={output.mean():.4f}")
                 
                 return {"sample": output, "pred_xstart": pred_xstart}
             
             # 与训练/推理逻辑保持一致：单步蒸馏推理时使用 x_t = 0
             xt = torch.zeros_like(lms)
             
-            # 再次确认测试时predict_xstart设置
-            print(f"🔍 [SSDiff_test 单步蒸馏推理] predict_xstart = {self.args.predict_xstart}")
+            # 只在第一次forward时打印调试信息
+            if self._first_forward:
+                print(f"🔍 [SSDiff_test 单步蒸馏推理] predict_xstart = {self.args.predict_xstart}")
             
             # 可选：添加对比实验 - 使用带噪声的x_t（与训练更接近）
             if hasattr(self.args, 'test_with_noise') and self.args.test_with_noise:
-                print("🔬 使用带噪声的x_t进行测试（更接近训练分布）")
+                if self._first_forward:
+                    print("🔬 使用带噪声的x_t进行测试（更接近训练分布）")
                 # 对整张图生成一致的噪声，避免patch边界问题
                 noise = torch.randn_like(lms)
                 # 时间步固定t=999
                 t_full = torch.full((lms.shape[0],), 999, device=self.device, dtype=torch.long)
                 # 对零残差加噪
                 xt = self.diffusion.q_sample_xt(torch.zeros_like(lms), t_full, noise=noise)
-                print(f"   带噪x_t范围: [{xt.min():.4f}, {xt.max():.4f}], 均值={xt.mean():.4f}, 标准差={xt.std():.4f}")
+                if self._first_forward:
+                    print(f"   带噪x_t范围: [{xt.min():.4f}, {xt.max():.4f}], 均值={xt.mean():.4f}, 标准差={xt.std():.4f}")
                         
             # 🔥 统一使用 forward_chop 处理（支持大图像patch切分）
             batch_size = lms.shape[0]
             timesteps = torch.full((batch_size,), 999, device=self.device, dtype=torch.long)
             
-            print(f"使用自定义的 forward_chop_distill 进行单步蒸馏推理")
+            if self._first_forward:
+                print(f"使用自定义的 forward_chop_distill 进行单步蒸馏推理")
+                self._first_forward = False  # 设置为False，后续不再打印
             
             # 🔥 使用我们在 SSNet.py 中新添加的 forward_chop_distill 方法
             # 这个方法直接处理输入，不需要经过复杂的 module.py 逻辑

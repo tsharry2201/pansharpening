@@ -8,15 +8,19 @@ DISTILLED_MODEL="./experiments/ssdiff_distill_20251103_010245/checkpoints/model_
 # 232238是改进后的蒸馏模型，但出现loss一直没降下来  第二次修改版是165605  第三次修改了加噪模式，但未使用 microbarch 221733
 #1103_010245是SSDiff+ARConv蒸馏
 # 原始预训练SSDiff（用于加载基础权重）
-PRETRAINED_SSDIFF="/home/zelilin/data/pansharpening/SSDiff_main/results/10-18-13-11/model120000.pt"
-
+#PRETRAINED_SSDIFF="/home/zelilin/data/pansharpening/SSDiff_main/results/10-18-13-11/model120000.pt"
+PRETRAINED_SSDIFF="/data2/user/zelilin/pansharpening/SSDiff_main/results/10-18-13-11/model120000.pt"
 # 测试配置
 TEST_DATASET="test_wv3_multiExm1.h5"  # 或 test_wv3_OrigScale_multiExm1.h5
 NUM_IMAGES=20
-DEVICE="cuda:1"
+DEVICE="cuda:4"
 OUTPUT_DIR="test_results/distilled"
 
-# 🔥 实验配置：是否使用带噪声的 x_t（更接近训练分布）
+#ensemble推理（8种几何变换）效果不好
+
+#*** 注意两个版本的skip_c0不一样
+
+#  实验配置：是否使用带噪声的 x_t（更接近训练分布）
 # True: 使用 q_sample_xt(0, t=999, noise) 生成带噪声的 x_t
 # False (或留空): 使用 x_t=0（稳定、可复现）
 USE_NOISE="False"  # 改为 "True" 来测试带噪版本

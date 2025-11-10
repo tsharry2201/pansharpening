@@ -29,7 +29,7 @@ rootPath = os.path.abspath(os.path.dirname(__file__))
 
 
 def main(
-    device='cuda:4',
+    device='cuda:5',
     crop_batch_size=8,
     timestep_respacing="ddim10",
     test_dataset=None  # 新增：指定测试数据集
@@ -80,6 +80,7 @@ def main(
     data4lms = []
     data4ms = []
     data4pan = []
+    psnr_list = []
     # image_num = len(data)
     image_num = 20
     print("image_num:", image_num)
@@ -90,11 +91,22 @@ def main(
         pan_ori, lms_ori, ms_ori, gt = batch['pan'], batch['lms'], batch['ms'], batch['gt']
         # 动态获取图像尺寸，支持 Reduced-Resolution (256x256) 和 Full-Resolution (512x512)
         gt =  einops.rearrange(gt, 'b k1 k2 c -> b c k1 k2')
-
+        
         data4gt.append(gt[0])
         data4lms.append(lms_ori[0])
         data4ms.append(ms_ori[0])
         data4pan.append(pan_ori[0])
+
+        lms_np = lms_ori[0].cpu().numpy().astype(np.float64)
+        gt_np = gt[0].cpu().numpy().astype(np.float64)
+        if lms_np.max() <= 1.1 and gt_np.max() <= 1.1:
+            max_val = 1.0
+        else:
+            max_val = 2047.0
+        mse = np.mean((lms_np - gt_np) ** 2)
+        psnr = float('inf') if mse == 0 else 10 * np.log10((max_val ** 2) / mse)
+        psnr_list.append(psnr)
+        print(f"[LMS vs GT] image {i}: PSNR={psnr:.4f} dB, MSE={mse:.4f}")
 
         pan, lms, ms = map(lambda x: x.cuda(), (pan_ori, lms_ori, ms_ori))
         logger.log(f"test [{i}]/[{image_num}],  {args.timestep_respacing}", pan.shape, lms.shape, ms.shape)
@@ -104,10 +116,18 @@ def main(
         )
 
         kwargs_data = {"lms": lms, "pan": pan, "ms": ms}
-
+        
+        # 创建与 shape 参数匹配的噪声初始化（不是与 lms 匹配！）
+        shape = (args.crop_batch_size, args.ms_dim, args.image_size, args.image_size)
+        noise_init = th.zeros(*shape, device=lms.device)  # 从零开始（无残差）
+        
+        # 如果想要小幅度随机噪声，可以改为：
+        #noise_init = th.randn(*shape, device=lms.device) * 0.01
+        
         sample = sample_fn(
                     model,
-                    shape=(args.crop_batch_size, args.ms_dim, args.image_size, args.image_size),
+                    shape=shape,
+                    noise=noise_init,
                     model_kwargs=kwargs_data,
                     clip_denoised=args.clip_denoised,
                     progress=False)
@@ -131,6 +151,13 @@ def main(
     print(len(all_images))
     arr = np.concatenate(all_images, axis=0)
     arr = arr[: args.num_samples]
+
+    if psnr_list:
+        psnr_array = np.array(psnr_list)
+        print(
+            f"[LMS vs GT] PSNR stats -> mean: {psnr_array.mean():.4f} dB, "
+            f"std: {psnr_array.std():.4f}, min: {psnr_array.min():.4f}, max: {psnr_array.max():.4f}"
+        )
 
     # 从模型路径中提取模型名称
     model_path = args.model_path
@@ -176,8 +203,8 @@ if __name__ == "__main__":
     # Full-Resolution: 'test_wv3_OrigScale_multiExm1.h5'
     
     # Reduced-Resolution 评估
-    out_path = main()
-    
+    #out_path = main()
+    out_path = main(test_dataset='test_wv3_multiExm1_otpnet.h5')
     # Full-Resolution 评估（取消注释以使用）
     #out_path = main(test_dataset='test_wv3_OrigScale_multiExm1.h5')
 

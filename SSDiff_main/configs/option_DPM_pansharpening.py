@@ -23,18 +23,24 @@ class parser_args(TaskDispatcher, name='DPM_ps'):
         root_dir = script_path.split(cfg.task)[0].replace('\\', '/')
         
         # 硬编码数据集路径
-        data_dir = '/home/zelilin/data/pansharpening/SSDiff_main/dataset'
-
+        #data_dir = '/home/zelilin/data/pansharpening/SSDiff_main/dataset'
+        data_dir = '/data2/user/zelilin/pansharpening/SSDiff_main/dataset'
         # 继续训练时，设置checkpoint路径
         # 例如：ckpt_model_path = "/home/zelilin/data/pansharpening/SSDiff_main/results/10-17-03-13/model065000.pt"
-        ckpt_model_path = "/home/zelilin/data/pansharpening/SSDiff_main/results/11-04-21-29/model052000.pt"
+        ckpt_model_path = "/data2/user/zelilin/pansharpening/SSDiff_main/results/11-07-23-43/model080000.pt"
         
         # 修改为您的模型路径
         # EMA模型（推荐）：results/MM-DD-HH-MM/ema_0.9999_XXXXXX.pt
         # 或主模型：results/MM-DD-HH-MM/modelXXXXXX.pt
-        test_model_path = "/home/zelilin/data/pansharpening/SSDiff_main/results/11-04-21-21/model120000.pt"
+        #test_model_path = "/home/zelilin/data/pansharpening/SSDiff_main/results/11-05-22-52/model120000.pt"
+        #test_model_path = "/data2/user/zelilin/pansharpening/SSDiff_main/results/11-07-23-43/model070000.pt"       
+        test_model_path = "/data2/user/zelilin/pansharpening/SSDiff_main/results/11-07-23-39/model110000.pt"       
         #10-14-22-28代表是+ARConv的    10-15-17-45是没有ARConv的  10-15-22-29是调整ARConv中fix为1e4的 10-17-03-13是fix为1e3的  10-17-12-19是fix为5e3的 1600是继续训0313的
         #11042121 是新版在OTPNet下进行的，fix 为5e3  2129fix为2e3
+        #11052252 是SSDiff无OTPNet下训练的  11061941 是使用了ARConv+OPTNet数据集 fix为2e3 都是有问题的
+        #11071332 是fix为2e3的 11071334是fix为5e3 搞错了，这个是用原来的训的
+        #增加了skip_connection lms的模型 11072339 fix 为5e3   2343 是fix为2e3的 
+        #11090005 是继续训练2343 从8e4 epoch开始
         parser = argparse.ArgumentParser(description='PyTorch Training')
         # * Logger
         parser.add_argument('--out_dir', metavar='DIR', default=f'{root_dir}/results/{cfg.task}',
@@ -42,10 +48,10 @@ class parser_args(TaskDispatcher, name='DPM_ps'):
         parser.add_argument('--data_dir', metavar='DIR', default=data_dir,
                             help='path to dataset')
         # * Training
-        parser.add_argument('--lr', default=1e-3, type=float)  # 1e-4 2e-4
+        parser.add_argument('--lr', default=2e-4, type=float)  # 1e-4 2e-4 原来使用的是1e-3
         parser.add_argument('--lr_scheduler', default=True, type=bool)
-        parser.add_argument('--crop_batch_size', default=8, type=int)  # 减小以适应24GB显存
-        parser.add_argument('--samples_per_gpu', default=8, type=int,              # batch_size 从20降至8
+        parser.add_argument('--crop_batch_size', default=24, type=int)  # 减小以适应24GB显存
+        parser.add_argument('--samples_per_gpu', default=16, type=int,              # batch_size 从20降至8
                             metavar='N', help='mini-batch size (default: 256)')
         parser.add_argument('--print-freq', '-p', default=500, type=int,
                             metavar='N', help='print frequency (default: 10)')
@@ -63,13 +69,12 @@ class parser_args(TaskDispatcher, name='DPM_ps'):
                             choices=['PanNet', 'DiCNN', 'PNN', 'FusionNet'])
     # 使用本地 WV3 的 otpnet 版本作为默认 dataset（train/valid/test）
     # 注意：本 repo dataset 目录下存在文件 train_wv3_otpnet.h5 / valid_wv3_otpnet.h5
-        parser.add_argument('--dataset', default={'train': 'wv3_otpnet', 'valid': 'wv3_otpnet', 'test': 'test_wv3_multiExm1.h5'},
+        parser.add_argument('--dataset', default={'train': 'wv3_otpnet', 'valid': 'wv3_otpnet', 'test': 'test_wv3_multiExm1_otpnet.h5'},
                 choices=[None, 'wv2', 'wv3', 'wv3_otpnet', 'wv4', 'qb', 'gf2',
                      'wv3_OrigScale_multiExm1.h5', 'wv3_multiExm1.h5'],
                 help="performing evalution for patch2entire")
         parser.add_argument('--eval', default=False, type=bool,
             help="performing evalution for patch2entire")
-
         parser.add_argument('--dim', default=32, type=int)
         parser.add_argument('--dim_head', default=16, type=int)
         parser.add_argument('--se_ratio_mlp', default=0.5, type=float)
@@ -110,7 +115,7 @@ class parser_args(TaskDispatcher, name='DPM_ps'):
 
         # *
         parser.add_argument('--log_interval', default=100)
-        parser.add_argument('--save_interval', default=1000)
+        parser.add_argument('--save_interval', default=200)
         parser.add_argument('--resume_checkpoint', default="")
         parser.add_argument('--weight_decay', default=0)
 
@@ -130,5 +135,17 @@ class parser_args(TaskDispatcher, name='DPM_ps'):
         cfg.workflow = [('train', 1)]
         cfg.img_range = 2047.0
         cfg.dataloader_name = "PanCollection_dataloader"
+        
+        # 强制设置使用 OTPNet 数据集
+        if hasattr(cfg, 'dataset'):
+            if isinstance(cfg.dataset, dict):
+                cfg.dataset['train'] = 'wv3_otpnet'
+                cfg.dataset['valid'] = 'wv3_otpnet'
+                cfg.dataset['test'] = 'test_wv3_multiExm1_otpnet.h5'
+        if hasattr(args, 'dataset'):
+            if isinstance(args.dataset, dict):
+                args.dataset['train'] = 'wv3_otpnet'
+                args.dataset['valid'] = 'wv3_otpnet'
+                args.dataset['test'] = 'test_wv3_multiExm1_otpnet.h5'
 
         self.merge_from_dict(cfg)
